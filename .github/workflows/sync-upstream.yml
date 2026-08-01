@@ -1,0 +1,51 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: "37 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: sync-upstream-master
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'exynos967/OpenAlice'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: master
+
+      - name: Merge upstream master
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/TraderAlice/OpenAlice.git
+          git fetch --no-tags upstream master
+
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git merge --no-edit upstream/master
+          git push origin HEAD:master
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+      # GITHUB_TOKEN-authenticated pushes do not emit another push workflow run.
+      - name: Publish the merged image
+        if: steps.merge.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docker-publish.yml --ref master

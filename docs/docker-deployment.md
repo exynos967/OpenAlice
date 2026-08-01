@@ -49,8 +49,15 @@ interactive Pi still leaves that trust decision visible to the user.
 
 ## Start and Authenticate
 
+The repository Compose file pulls `ghcr.io/exynos967/openalice:latest` by
+default. Pull explicitly before `up` when upgrading an existing installation.
+After the first publish workflow succeeds, the fork maintainer must make the
+`openalice` container package public in GitHub package settings; private
+packages require `docker login ghcr.io` before these commands.
+
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose ps
 docker compose logs openalice
 ```
@@ -90,7 +97,8 @@ Useful operations:
 docker compose logs --tail=200 -f openalice
 docker compose restart openalice
 docker compose down
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 `docker compose down` preserves the named volume. `docker compose down -v` is

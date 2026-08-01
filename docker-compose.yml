@@ -1,12 +1,12 @@
 # Single-service compose for OpenAlice self-hosting.
 #
 # First time:
-#   docker compose up -d --build
+#   docker compose up -d
 #   docker exec -it openalice claude        # OAuth — paste URL into a browser
 #   docker exec -it openalice codex login   # same for codex (if you use it)
 #
 # After that the volume holds your auth + workspaces + config across
-# restarts and image rebuilds. Tear-down + factory reset:
+# restarts and image updates. Tear-down + factory reset:
 #   docker compose down -v        # also nukes the volume
 #
 # Already have claude/codex auth on the host? Skip the docker exec step by
@@ -14,8 +14,7 @@
 
 services:
   openalice:
-    build: .
-    image: openalice:local
+    image: ghcr.io/exynos967/openalice:latest
     container_name: openalice
     restart: unless-stopped
     stop_grace_period: 30s

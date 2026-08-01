@@ -214,9 +214,12 @@ openalice remote openalice-box \
 
 Choose Docker when the container image, volume, healthcheck, bundled Agent
 runtimes, and HTTPS/private-proxy lifecycle are benefits rather than overhead:
+the GHCR package must be public or the host must already be logged in to
+`ghcr.io`.
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose ps
 ```
 
