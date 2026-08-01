@@ -18,6 +18,7 @@ import {
   previousDesktopAssetName,
   selectPreviousDesktopTag,
   versionFromTag,
+  windowsInstallerArgs,
 } from './desktop-upgrade-smoke-lib.mjs'
 import { packagedElectronExecutable } from './smoke-packaged-toolchain.mjs'
 
@@ -82,9 +83,42 @@ async function waitForPath(path, timeoutMs = 30_000) {
   throw new Error(`timed out waiting for ${path}`)
 }
 
-async function installWindows(archive, installRoot) {
+async function waitForInstalledVersion(installRoot, expectedVersion, timeoutMs = 8 * 60_000) {
+  const packageJson = join(installRoot, 'resources', 'app', 'package.json')
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const installedVersion = JSON.parse(readFileSync(packageJson, 'utf8')).version
+      if (installedVersion === expectedVersion) return
+    } catch {
+      // NSIS replaces the package tree in place; partial reads are expected while it runs.
+    }
+    await sleep(500)
+  }
+  throw new Error(`timed out waiting for installed OpenAlice ${expectedVersion} under ${installRoot}`)
+}
+
+async function spawnDetached(command, args) {
+  console.log(`[desktop-upgrade] ${command} ${args.join(' ')}`)
+  const child = spawn(command, args, { detached: true, stdio: 'ignore' })
+  await new Promise((resolveSpawn, rejectSpawn) => {
+    child.once('spawn', resolveSpawn)
+    child.once('error', rejectSpawn)
+  })
+  child.unref()
+}
+
+async function installWindows(archive, installRoot, isUpdate = false) {
   mkdirSync(dirname(installRoot), { recursive: true })
-  run(archive, ['/S', `/D=${installRoot}`])
+  const args = windowsInstallerArgs(installRoot, isUpdate)
+  if (isUpdate) {
+    // NsisUpdater starts the installer detached, then quits Electron. Waiting for
+    // the detached NSIS process itself can hang after its files are installed.
+    await spawnDetached(archive, args)
+    await waitForInstalledVersion(installRoot, candidateVersion)
+  } else {
+    run(archive, args)
+  }
   const executable = join(installRoot, 'OpenAlice.exe')
   await waitForPath(executable)
   return executable
@@ -351,7 +385,7 @@ async function main() {
       candidateSource = 'final-artifact'
       candidateExecutable = process.platform === 'darwin'
         ? extractMacZip(asset, join(smokeRoot, 'candidate'))
-        : await installWindows(asset, join(smokeRoot, 'installed', 'OpenAlice'))
+        : await installWindows(asset, join(smokeRoot, 'installed', 'OpenAlice'), true)
     } else {
       candidateSource = 'unpacked-package'
       candidateExecutable = await candidateExecutableFromPackage(plan.candidatePackageRoot)
