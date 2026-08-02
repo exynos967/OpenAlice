@@ -308,7 +308,7 @@ hitting the broker, which otherwise expects the bare base ticker.`,
     }),
 
     getAccount: tool({
-      description: `Query trading account info (netLiquidation, totalCashValue, buyingPower, unrealizedPnL, realizedPnL).
+      description: `Query trading account info (netLiquidation, totalCashValue, buyingPower, unrealizedPnL, realizedPnL, and read-only investment holdings when reported).
 If this tool returns an error with transient=true, wait a few seconds and retry once before reporting to the user.
 When multiple accounts are queried, a healthy account appears with its balances and a failed one appears as an entry with an \`error\` field (and \`source\`). ALWAYS surface failed accounts to the user — an entry with transient=false is a permanent (credentials/config) failure they must fix, not retry. An entry with code="CONNECTING" is NOT a failure: that account is still establishing its broker connection and its data will populate on a later read — don't report it as broken.`,
       inputSchema: z.object({

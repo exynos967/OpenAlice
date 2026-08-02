@@ -24,6 +24,7 @@
  */
 
 import type { Exchange, Order as CcxtOrder, Position as CcxtPosition } from 'ccxt'
+import type { InvestmentHolding } from '../types.js'
 import { binanceOverrides } from './exchanges/binance.js'
 import { bybitOverrides } from './exchanges/bybit.js'
 import { hyperliquidOverrides } from './exchanges/hyperliquid.js'
@@ -111,10 +112,13 @@ export interface CcxtExchangeOverrides {
    *  fatal. */
   subAccounts?: CcxtSubAccountDef[]
 
-  /** Fetch non-trading product equity that is absent from CCXT fetchBalance().
-   *  The returned decimal string is added only to an aggregate account's
-   *  netLiquidation; it is intentionally excluded from cash and positions. */
-  fetchSupplementalAccountEquity?(exchange: Exchange): Promise<string>
+  /** Fetch non-trading products that are absent from CCXT fetchBalance().
+   *  Equity is added only to an aggregate account's netLiquidation. Holdings
+   *  remain read-only account metadata and never enter tradeable positions. */
+  fetchSupplementalAccount?(exchange: Exchange): Promise<{
+    equity: string
+    investments: InvestmentHolding[]
+  }>
 }
 
 /** One CCXT sub-account: a logical wallet aggregating CCXT balance `type`s. */

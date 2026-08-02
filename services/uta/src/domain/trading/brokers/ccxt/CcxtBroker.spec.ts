@@ -1000,6 +1000,97 @@ describe('CcxtBroker — getAccount', () => {
     expect(request).toHaveBeenCalledWith('rwusd/account', 'sapi', 'GET', {})
     expect(info.netLiquidation).toBe('1350.5')
     expect(info.totalCashValue).toBe('100')
+    expect(info.investments).toEqual([
+      { product: 'rwusd', asset: 'RWUSD', amount: '1000' },
+    ])
+  })
+
+  it('returns Binance Simple Earn and RWUSD holdings with annualized rates', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {})
+
+    ;(acc as any).exchange.fetchBalance = vi.fn(async ({ type }: { type: string }) => {
+      if (type === 'spot') return { USDT: { total: 100 } }
+      return {}
+    })
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockResolvedValue([])
+    ;(acc as any).exchange.sapiGetSimpleEarnAccount = vi.fn().mockResolvedValue({ totalAmountInUSDT: '250.5' })
+    ;(acc as any).exchange.sapiGetSimpleEarnFlexiblePosition = vi.fn().mockResolvedValue({
+      rows: [{ asset: 'usdc', totalAmount: '125.25', latestAnnualPercentageRate: '0.045' }],
+      total: 1,
+    })
+    ;(acc as any).exchange.sapiGetSimpleEarnLockedPosition = vi.fn().mockResolvedValue({
+      rows: [{ asset: 'btc', amount: '0.1', apy: '0.08' }],
+      total: 1,
+    })
+    ;(acc as any).exchange.sapiGetRwusdAccount = vi.fn().mockResolvedValue({ rwusdAmount: '1000' })
+    ;(acc as any).exchange.request = vi.fn().mockResolvedValue({
+      rows: [{ annualPercentageRate: '0.042' }],
+      total: '1',
+    })
+
+    const info = await acc.getAccount()
+
+    expect(info.investments).toEqual([
+      {
+        product: 'simple-earn-flexible',
+        asset: 'USDC',
+        amount: '125.25',
+        annualPercentageRate: '0.045',
+      },
+      {
+        product: 'simple-earn-locked',
+        asset: 'BTC',
+        amount: '0.1',
+        annualPercentageRate: '0.08',
+      },
+      {
+        product: 'rwusd',
+        asset: 'RWUSD',
+        amount: '1000',
+        annualPercentageRate: '0.042',
+      },
+    ])
+    expect((acc as any).exchange.request).toHaveBeenCalledWith(
+      'rwusd/history/rateHistory',
+      'sapi',
+      'GET',
+      { current: 1, size: 1 },
+    )
+  })
+
+  it('keeps already-read Binance Earn holdings when a later page fails', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {})
+
+    ;(acc as any).exchange.fetchBalance = vi.fn(async ({ type }: { type: string }) => {
+      if (type === 'spot') return { USDT: { total: 100 } }
+      return {}
+    })
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockResolvedValue([])
+    ;(acc as any).exchange.sapiGetSimpleEarnAccount = vi.fn().mockResolvedValue({ totalAmountInUSDT: '100' })
+    ;(acc as any).exchange.sapiGetSimpleEarnFlexiblePosition = vi.fn()
+      .mockResolvedValueOnce({
+        rows: Array.from({ length: 100 }, () => ({
+          asset: 'USDC',
+          totalAmount: '1',
+          latestAnnualPercentageRate: '0.04',
+        })),
+        total: 101,
+      })
+      .mockRejectedValueOnce(new Error('temporary page failure'))
+    ;(acc as any).exchange.sapiGetSimpleEarnLockedPosition = vi.fn().mockResolvedValue({ rows: [], total: 0 })
+    ;(acc as any).exchange.sapiGetRwusdAccount = vi.fn().mockResolvedValue({ rwusdAmount: '0' })
+
+    const info = await acc.getAccount()
+
+    expect(info.investments).toHaveLength(100)
+    expect(info.investments?.[0]).toEqual({
+      product: 'simple-earn-flexible',
+      asset: 'USDC',
+      amount: '1',
+      annualPercentageRate: '0.04',
+    })
   })
 
   it('keeps Binance Earn balances out of the scoped spot trading account', async () => {
@@ -1059,7 +1150,7 @@ describe('CcxtBroker — getAccount', () => {
     const info = await acc.getAccount()
 
     expect(fetchRwusd).toHaveBeenCalledWith({})
-    expect(request).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalledWith('rwusd/account', 'sapi', 'GET', {})
     expect(info.netLiquidation).toBe('1100')
   })
 

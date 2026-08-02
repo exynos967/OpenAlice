@@ -264,5 +264,6 @@ export function compactAccountInfo(info: unknown): AnyRec {
   pick(out, 'initMarginReq', money(k['initMarginReq']))
   pick(out, 'maintMarginReq', money(k['maintMarginReq']))
   if (k['dayTradesRemaining'] != null) out['dayTradesRemaining'] = k['dayTradesRemaining']
+  if (Array.isArray(k['investments']) && k['investments'].length > 0) out['investments'] = k['investments']
   return out
 }

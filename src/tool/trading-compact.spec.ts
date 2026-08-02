@@ -131,4 +131,22 @@ describe('compactAccountInfo', () => {
     })
     expect('buyingPower' in a).toBe(false)
   })
+
+  it('preserves read-only investment holdings and rates', () => {
+    const investments = [
+      {
+        product: 'simple-earn-flexible',
+        asset: 'USDC',
+        amount: '125.25',
+        annualPercentageRate: '0.045',
+      },
+    ]
+    expect(compactAccountInfo({
+      baseCurrency: 'USD',
+      netLiquidation: '125.25',
+      totalCashValue: '0',
+      unrealizedPnL: '0',
+      investments,
+    })).toMatchObject({ investments })
+  })
 })

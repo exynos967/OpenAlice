@@ -44,6 +44,12 @@ alice-uta account portfolio --source <account-id> --symbol AAPL
 `--source` takes the id returned by `account list`; it is not `--account` and
 is not a broker-native account number.
 
+For Binance, omit `--sub-account-id` to read aggregate equity plus read-only
+Simple Earn / RWUSD holdings and annualized rates. The only valid scoped trading
+wallets are `spot` and `derivatives`; never invent an `earn` sub-account. Earn
+products appear under `investments` on aggregate `account info`, not under
+tradeable `account portfolio` positions.
+
 Resolve a broker contract before requesting a quote. Search uses `--pattern`
 (not `--query`). Quote accepts exactly one broker-resolved `--alice-id` at a
 time; repeat the command for multiple contracts rather than inventing a

@@ -16,6 +16,7 @@ import {
   type IBroker,
   type AccountCapabilities,
   type AccountInfo,
+  type InvestmentHolding,
   type Position,
   type PositionRisk,
   type PlaceOrderResult,
@@ -994,15 +995,19 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
       // from fetchBalance(). They count toward aggregate net liquidation, but
       // are neither trading cash nor actionable positions/sub-accounts.
       let supplementalEquity = new Decimal(0)
-      if (subAccountId === undefined && this.overrides.fetchSupplementalAccountEquity) {
+      let investments: InvestmentHolding[] = []
+      if (subAccountId === undefined && this.overrides.fetchSupplementalAccount) {
         try {
-          supplementalEquity = new Decimal(await this.overrides.fetchSupplementalAccountEquity(this.exchange))
+          const supplemental = await this.overrides.fetchSupplementalAccount(this.exchange)
+          supplementalEquity = new Decimal(supplemental.equity)
           if (!supplementalEquity.isFinite() || supplementalEquity.lt(0)) supplementalEquity = new Decimal(0)
+          investments = supplemental.investments
         } catch (err) {
           console.warn(
             `CcxtBroker[${this.id}]: supplemental account equity skipped — ${err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120)}`,
           )
           supplementalEquity = new Decimal(0)
+          investments = []
         }
       }
 
@@ -1028,6 +1033,7 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
         unrealizedPnL: unrealizedPnL.toString(),
         realizedPnL: realizedPnL.toString(),
         initMarginReq: initMargin.toString(),
+        ...(investments.length > 0 ? { investments } : {}),
       }
     } catch (err) {
       throw BrokerError.from(err)

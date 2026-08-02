@@ -248,6 +248,18 @@ export interface OpenOrder {
 
 // ==================== Account info ====================
 
+/** Read-only investment product that contributes to account equity. */
+export interface InvestmentHolding {
+  /** Venue product family, e.g. `simple-earn-flexible` or `rwusd`. */
+  product: string
+  /** Asset in which `amount` is denominated. */
+  asset: string
+  /** Principal currently held in the product. */
+  amount: string
+  /** Current annualized rate as a decimal fraction (`0.05` means 5%). */
+  annualPercentageRate?: string
+}
+
 /** Field names aligned with IBKR AccountSummaryTags. All monetary fields are strings to prevent IEEE 754 artifacts. */
 export interface AccountInfo {
   /** Base currency of this account — all monetary fields are denominated in this currency. */
@@ -260,6 +272,8 @@ export interface AccountInfo {
   initMarginReq?: string
   maintMarginReq?: string
   dayTradesRemaining?: number
+  /** Non-trading products included in aggregate equity, omitted for scoped trading wallets. */
+  investments?: InvestmentHolding[]
 }
 
 // ==================== Sub-accounts ====================
