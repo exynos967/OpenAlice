@@ -3,9 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { BrokerPreset } from '../../api/types'
 
-const { getBrokerPacks, installBrokerPack } = vi.hoisted(() => ({
+const { getBrokerPacks, installBrokerPack, testConnection } = vi.hoisted(() => ({
   getBrokerPacks: vi.fn(),
   installBrokerPack: vi.fn(),
+  testConnection: vi.fn(),
 }))
 
 vi.mock('../../api', () => ({
@@ -13,7 +14,7 @@ vi.mock('../../api', () => ({
     trading: {
       getBrokerPacks,
       installBrokerPack,
-      testConnection: vi.fn(),
+      testConnection,
     },
   },
 }))
@@ -68,6 +69,7 @@ beforeEach(() => {
   installBrokerPack.mockResolvedValue({
     engine: 'ccxt', installed: true, source: 'downloaded', version: '1.0.0', requiredBy: [],
   })
+  testConnection.mockResolvedValue({ success: true, positions: [] })
 })
 
 describe('CreateUTADialog', () => {
@@ -150,6 +152,25 @@ describe('CreateUTADialog', () => {
     expect(screen.getByText('status endpoint unavailable')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Install OKX support' })).toBeTruthy()
     expect(screen.queryByText('API key')).toBeNull()
+  })
+
+  it('allows saving when account access succeeds but positions are unavailable', async () => {
+    testConnection.mockResolvedValueOnce({
+      success: true,
+      positions: [],
+      warning: 'Account connected, but position access was rejected with the current credentials.',
+    })
+    setup()
+
+    await waitFor(() => expect(getBrokerPacks).toHaveBeenCalled())
+    fireEvent.click(screen.getByText('OKX'))
+    fireEvent.change(screen.getByPlaceholderText('Required'), { target: { value: 'test-key' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection →' }))
+
+    await waitFor(() => expect(screen.getByText('Connected with partial access')).toBeTruthy())
+    expect(screen.getByText(/position access was rejected/i)).toBeTruthy()
+    expect(screen.queryByText(/account is empty/i)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Save connector' })).toBeTruthy()
   })
 
   it('surfaces an onboarding escape action from every wizard step', () => {

@@ -564,6 +564,7 @@ export interface GuardEntry {
 export interface TestConnectionResult {
   success: boolean
   error?: string
+  warning?: string
   account?: AccountInfo
   positions?: Position[]
 }

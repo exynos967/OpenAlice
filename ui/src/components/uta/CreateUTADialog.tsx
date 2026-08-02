@@ -466,6 +466,13 @@ function TestResultPanel({ result, utaId }: { result: TestConnectionResult; utaI
         <span className="text-[13px] font-medium text-success">Connected as {utaId}</span>
       </div>
 
+      {result.warning && (
+        <div className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2.5 space-y-1">
+          <p className="text-[12px] font-medium text-warning">Connected with partial access</p>
+          <p className="text-[11px] text-muted-foreground leading-relaxed">{result.warning}</p>
+        </div>
+      )}
+
       {acct && (
         <div className="rounded-md border border-border bg-secondary/50 px-3 py-2.5 space-y-1">
           <div className="flex justify-between text-[12px]">
@@ -490,7 +497,11 @@ function TestResultPanel({ result, utaId }: { result: TestConnectionResult; utaI
           Positions ({positions.length})
         </p>
         {positions.length === 0 ? (
-          <p className="text-[12px] text-muted-foreground">No open positions — connection works, account is empty.</p>
+          <p className="text-[12px] text-muted-foreground">
+            {result.warning
+              ? 'Positions were not loaded during the connection test.'
+              : 'No open positions — connection works, account is empty.'}
+          </p>
         ) : (
           <div className="rounded-md border border-border overflow-hidden">
             <table className="w-full text-[11px]">

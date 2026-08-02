@@ -80,6 +80,11 @@ const ALLOWED_ASSET_CLASSES: ReadonlySet<AssetClassHint> = new Set([
   'equity', 'crypto', 'currency', 'commodity', 'unknown',
 ])
 
+function isPositionPermissionError(err: unknown): boolean {
+  const brokerError = BrokerError.from(err)
+  return brokerError.code === 'AUTH' || /"code"\s*:\s*-2015\b/.test(brokerError.message)
+}
+
 /** Resolve account by :id param, return 404 if not found. */
 function resolveAccount(ctx: UTAEngineContext, c: Context): UnifiedTradingAccount | null {
   const id = c.req.param('id')
@@ -184,10 +189,11 @@ export function createTradingRoutes(ctx: UTAEngineContext) {
 
   // ==================== Broker test-connection ====================
   // Setup-wizard probe: instantiate a broker from the supplied preset
-  // config, connect, query account + positions to prove credentials are
-  // valid, then disconnect. Ephemeral — does NOT register the broker
-  // with UTAManager. Alice's `/api/trading/config/test-connection`
-  // endpoint forwards here.
+  // config, connect, and query the account to prove credentials are valid.
+  // Position access is best-effort because some venues expose spot accounts
+  // while rejecting optional derivatives endpoints. Ephemeral — does NOT
+  // register the broker with UTAManager. Alice's
+  // `/api/trading/config/test-connection` endpoint forwards here.
   app.post('/test-connection', async (c) => {
     let broker: { init: () => Promise<void>; getAccount: () => Promise<unknown>; getPositions: () => Promise<unknown>; close: () => Promise<void> } | null = null
     try {
@@ -197,8 +203,19 @@ export function createTradingRoutes(ctx: UTAEngineContext) {
       const utaConfig = utaConfigSchema.parse({ ...body, id: body.id ?? '__test__' })
       broker = await createBroker(utaConfig)
       await broker.init()
-      const [account, positions] = await Promise.all([broker.getAccount(), broker.getPositions()])
-      return c.json({ success: true, account, positions })
+      const account = await broker.getAccount()
+      try {
+        const positions = await broker.getPositions()
+        return c.json({ success: true, account, positions })
+      } catch (err) {
+        if (!isPositionPermissionError(err)) throw err
+        return c.json({
+          success: true,
+          account,
+          positions: [],
+          warning: 'Account connected, but position access was rejected with the current credentials.',
+        })
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       return c.json({ success: false, error: msg }, 400)
