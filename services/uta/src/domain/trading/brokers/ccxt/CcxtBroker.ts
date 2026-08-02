@@ -784,14 +784,14 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
    * (and bootstraps any unaccounted qty via `reconcileBalance` at observed
    * markPrice) — the `avgCostSource: 'wallet'` flag signals this.
    */
-  private async fetchAssetHoldings(subAccountId?: string): Promise<Position[]> {
+  private async fetchAssetHoldings(subAccountId?: string, requiredWalletType?: string): Promise<Position[]> {
     // The SAME fungible asset can sit in multiple wallets (e.g. BTC as a spot
     // balance AND as futures-wallet collateral) — it's the same asset, so within
     // the requested scope we aggregate by coin into ONE holding (ANG-111).
     // Stablecoins are cash (valued in getAccount), not holdings here. The
     // `subAccountId` selector narrows which wallets contribute: omitted ⇒ every
     // wallet, 'spot' ⇒ the spot wallet, 'derivatives' ⇒ the futures wallets.
-    const { balances } = await this.gatherWalletBalances(subAccountId)
+    const { balances } = await this.gatherWalletBalances(subAccountId, requiredWalletType)
 
     const qtyByCoin = new Map<string, Decimal>()
     for (const b of balances) {
@@ -888,10 +888,12 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
    * (e.g. an un-activated COIN-M wallet → -2015) is skipped loudly, not fatal.
    * Also rolls up futures `totalInitialMargin` for the account's margin figure.
    */
-  private async gatherWalletBalances(subAccountId?: string): Promise<{ balances: Array<Record<string, unknown>>; initMargin: Decimal }> {
+  private async gatherWalletBalances(subAccountId?: string, requiredWalletType?: string): Promise<{ balances: Array<Record<string, unknown>>; initMargin: Decimal }> {
     const walletTypes = this.walletTypesFor(subAccountId)
     const balances: Array<Record<string, unknown>> = []
     let initMargin = new Decimal(0)
+    let requiredWalletRead = requiredWalletType === undefined
+    let requiredWalletError: unknown
     const accrue = (b: Record<string, unknown>) => {
       balances.push(b)
       const info = (b['info'] ?? {}) as Record<string, unknown>
@@ -901,12 +903,19 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
       for (const type of walletTypes) {
         try {
           accrue(await this.exchange.fetchBalance({ type }) as unknown as Record<string, unknown>)
+          if (type === requiredWalletType) requiredWalletRead = true
         } catch (err) {
+          if (type === requiredWalletType) requiredWalletError = err
           console.warn(`CcxtBroker[${this.id}]: fetchBalance(${type}) skipped — ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`)
         }
       }
     } else {
       accrue(await this.exchange.fetchBalance() as unknown as Record<string, unknown>)
+    }
+    if (!requiredWalletRead) {
+      throw BrokerError.from(
+        requiredWalletError ?? new BrokerError('CONFIG', `CcxtBroker[${this.id}]: required wallet ${requiredWalletType} is not configured`),
+      )
     }
     return { balances, initMargin }
   }
@@ -1018,17 +1027,37 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
     // selector — an unknown id throws here.)
     const scoped = this.scopedSubAccounts(subAccountId)
     const includesDerivatives = scoped.some(s => s.kind === 'derivatives' || s.kind === 'unified')
+    const includesSpot = scoped.some(s => s.kind === 'spot')
+    const requiredSpotWalletType = subAccountId === undefined
+      ? scoped.find(s => s.kind === 'spot')?.walletTypes[0]
+      : undefined
 
     try {
       const fetchOverride = this.overrides.fetchPositions
+      let derivativePositionsUnavailable = false
+      const derivativePositions = includesDerivatives
+        ? (fetchOverride
+            ? fetchOverride(this.exchange, defaultFetchPositions)
+            : defaultFetchPositions(this.exchange))
+          .catch((err: unknown) => {
+            const brokerError = BrokerError.from(err)
+            // An aggregate read on a separate-wallet venue must not lose a
+            // readable spot portfolio only because its optional derivatives
+            // wallet is unavailable. Explicit derivative reads remain strict.
+            if (subAccountId === undefined && includesSpot && brokerError.code === 'AUTH') {
+              derivativePositionsUnavailable = true
+              return []
+            }
+            throw brokerError
+          })
+        : Promise.resolve([] as Awaited<ReturnType<typeof defaultFetchPositions>>)
       const [raw, spotHoldings] = await Promise.all([
-        includesDerivatives
-          ? (fetchOverride
-              ? fetchOverride(this.exchange, defaultFetchPositions)
-              : defaultFetchPositions(this.exchange))
-          : Promise.resolve([] as Awaited<ReturnType<typeof defaultFetchPositions>>),
-        this.fetchAssetHoldings(subAccountId),
+        derivativePositions,
+        this.fetchAssetHoldings(subAccountId, requiredSpotWalletType),
       ])
+      if (derivativePositionsUnavailable) {
+        console.warn(`CcxtBroker[${this.id}]: derivative positions unavailable for aggregate read — continuing with spot holdings`)
+      }
       const result: Position[] = []
 
       for (const p of raw) {

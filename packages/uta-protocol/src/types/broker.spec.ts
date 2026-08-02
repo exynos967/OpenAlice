@@ -26,4 +26,14 @@ describe('BrokerError.from', () => {
 
     expect(BrokerError.from(invalid).code).toBe('UNKNOWN')
   })
+
+  it('classifies Binance -2015 as an authentication or permission error', () => {
+    const err = new Error('binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action"}')
+
+    expect(BrokerError.from(err).code).toBe('AUTH')
+  })
+
+  it('classifies a timed-out request as a network error', () => {
+    expect(BrokerError.from(new Error('request timed out (10000 ms)')).code).toBe('NETWORK')
+  })
 })

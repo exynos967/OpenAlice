@@ -1095,6 +1095,58 @@ describe('CcxtBroker — sub-accounts', () => {
     expect(positions).toHaveLength(1)
     expect(positions[0].side).toBe('long')
   })
+
+  it('aggregate getPositions keeps spot holdings when Binance derivatives are unavailable', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, { 'BTC/USDT': makeSpotMarket('BTC', 'USDT', 'BTC/USDT') })
+
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockRejectedValue(
+      new Error('binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action"}'),
+    )
+    ;(acc as any).exchange.fetchBalance = vi.fn(async ({ type }: { type: string }) => {
+      if (type === 'spot') return { BTC: { total: 0.5 } }
+      throw new Error('binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action"}')
+    })
+    ;(acc as any).exchange.fetchTickers = vi.fn().mockResolvedValue({ 'BTC/USDT': { last: 60000 } })
+
+    const positions = await acc.getPositions()
+
+    expect(positions).toHaveLength(1)
+    expect(positions[0].marketValue).toBe('30000')
+  })
+
+  it('explicit derivative getPositions still rejects Binance -2015', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {})
+
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockRejectedValue(
+      new Error('binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action"}'),
+    )
+    ;(acc as any).exchange.fetchBalance = vi.fn().mockResolvedValue({})
+
+    await expect(acc.getPositions('derivatives')).rejects.toMatchObject({ code: 'AUTH' })
+  })
+
+  it('aggregate getPositions rejects Binance -2015 when the spot wallet is also unreadable', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {})
+
+    const permissionError = new Error('binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action"}')
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockRejectedValue(permissionError)
+    ;(acc as any).exchange.fetchBalance = vi.fn().mockRejectedValue(permissionError)
+
+    await expect(acc.getPositions()).rejects.toMatchObject({ code: 'AUTH' })
+  })
+
+  it('aggregate getPositions does not hide derivative network failures', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {})
+
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockRejectedValue(new Error('request timed out'))
+    ;(acc as any).exchange.fetchBalance = vi.fn().mockResolvedValue({})
+
+    await expect(acc.getPositions()).rejects.toMatchObject({ code: 'NETWORK' })
+  })
 })
 
 // ==================== getPositions ====================

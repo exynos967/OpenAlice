@@ -81,8 +81,7 @@ const ALLOWED_ASSET_CLASSES: ReadonlySet<AssetClassHint> = new Set([
 ])
 
 function isPositionPermissionError(err: unknown): boolean {
-  const brokerError = BrokerError.from(err)
-  return brokerError.code === 'AUTH' || /"code"\s*:\s*-2015\b/.test(brokerError.message)
+  return BrokerError.from(err).code === 'AUTH'
 }
 
 /** Resolve account by :id param, return 404 if not found. */

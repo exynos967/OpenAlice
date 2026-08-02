@@ -66,10 +66,11 @@ export class BrokerError extends Error {
     // Market closed — check before AUTH to avoid 403 misclassification
     if (/market.?closed|not.?open|trading.?halt|outside.?trading.?hours/i.test(m)) return 'MARKET_CLOSED'
     // Network / infrastructure
-    if (/timeout|etimedout|econnrefused|econnreset|socket hang up|enotfound|fetch failed/i.test(m)) return 'NETWORK'
+    if (/timeout|timed.?out|etimedout|econnrefused|econnreset|socket hang up|enotfound|fetch failed/i.test(m)) return 'NETWORK'
     if (/429|rate.?limit|too many requests/i.test(m)) return 'NETWORK'
     if (/502|503|504|service.?unavailable|bad.?gateway/i.test(m)) return 'NETWORK'
     // Authentication (401 only — 403 can mean market closed or permission denied)
+    if (/"code"\s*:\s*-2015\b/i.test(m)) return 'AUTH'
     if (/401|unauthorized|invalid.?key|invalid.?signature|authentication/i.test(m)) return 'AUTH'
     // Exchange-level rejections
     if (/403|forbidden/i.test(m)) return 'EXCHANGE'
