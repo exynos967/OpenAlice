@@ -1,0 +1,52 @@
+name: Publish Broker Packs
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: broker-pack-publish-master
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.repository == 'exynos967/OpenAlice' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and verify Linux Broker Packs
+        run: pnpm broker-packs:build
+
+      - name: Publish Docker Broker Pack channel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CHANNEL=broker-packs-latest
+          if ! gh release view "$CHANNEL" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$CHANNEL" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --title "Latest Docker Broker Packs" \
+              --notes "Mutable Broker Pack channel used by this fork's Docker Compose deployment."
+          fi
+          gh release upload "$CHANNEL" \
+            dist/broker-packs/*.json \
+            dist/broker-packs/*.tgz \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
