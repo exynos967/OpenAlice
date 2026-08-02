@@ -1024,7 +1024,27 @@ export class UnifiedTradingAccount {
   }
 
   async getPositions(subAccountId?: string): Promise<Position[]> {
-    const positions = await this._callBroker(() => this.broker.getPositions(subAccountId))
+    let positions: Position[]
+    try {
+      positions = await this._callBroker(() => this.broker.getPositions(subAccountId))
+    } catch (err) {
+      const brokerError = BrokerError.from(err)
+      if (subAccountId !== undefined || brokerError.code !== 'AUTH') throw brokerError
+
+      const subAccounts = await this._ensureSubAccounts()
+      const spotAccounts = subAccounts.filter(s => s.kind === 'spot')
+      const hasSeparateDerivatives = subAccounts.some(s => s.kind === 'derivatives')
+      if (!hasSeparateDerivatives || spotAccounts.length === 0) throw brokerError
+
+      const readableSpotPositions: Position[] = []
+      for (const spot of spotAccounts) {
+        readableSpotPositions.push(
+          ...await this._callBroker(() => this.broker.getPositions(spot.id)),
+        )
+      }
+      positions = readableSpotPositions
+      console.warn(`UTA[${this.id}]: aggregate positions unavailable — continuing with readable spot sub-accounts`)
+    }
     for (const p of positions) this.stampAliceId(p.contract)
     await this._reconcileWalletPositions(positions)
     return positions

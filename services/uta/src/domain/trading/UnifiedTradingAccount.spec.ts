@@ -3,6 +3,7 @@ import Decimal from 'decimal.js'
 import { Contract, Order, OrderState, UNSET_DOUBLE, UNSET_DECIMAL } from '@traderalice/ibkr'
 import { UnifiedTradingAccount } from './UnifiedTradingAccount.js'
 import type { UnifiedTradingAccountOptions } from './UnifiedTradingAccount.js'
+import { BrokerError } from './brokers/types.js'
 import { MockBroker, makeContract, makePosition, makeOpenOrder } from './brokers/mock/index.js'
 import type { Operation } from './git/types.js'
 import './contract-ext.js'
@@ -147,6 +148,35 @@ describe('UTA — sub-account write disambiguation', () => {
     // only its own sub-account (not 'first's leftover 'spot' duplicated).
     uta.stagePlaceOrder(placeParams('spot'))
     expect(uta.commit('second').message).toBe('second [sub:spot]')
+  })
+
+  it('aggregate account reads fall back to a readable spot wallet when derivatives reject authentication', async () => {
+    const broker = multiSubBroker()
+    const spotPosition = makePosition({ avgCostSource: 'broker' })
+    const getPositions = vi.spyOn(broker, 'getPositions').mockImplementation(async (subAccountId?: string) => {
+      if (subAccountId === 'spot') return [spotPosition]
+      throw new BrokerError('AUTH', 'binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action"}')
+    })
+    const { uta } = createUTA(broker)
+
+    const account = await uta.getAccount()
+
+    expect(account.baseCurrency).toBe('USD')
+    expect(getPositions).toHaveBeenNthCalledWith(1, undefined)
+    expect(getPositions).toHaveBeenNthCalledWith(2, 'spot')
+    expect(uta.health).toBe('healthy')
+  })
+
+  it('explicit derivative position reads remain strict after aggregate spot fallback', async () => {
+    const broker = multiSubBroker()
+    const getPositions = vi.spyOn(broker, 'getPositions').mockRejectedValue(
+      new BrokerError('AUTH', 'binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action"}'),
+    )
+    const { uta } = createUTA(broker)
+
+    await expect(uta.getPositions('derivatives')).rejects.toMatchObject({ code: 'AUTH' })
+    expect(getPositions).toHaveBeenCalledTimes(1)
+    expect(getPositions).toHaveBeenCalledWith('derivatives')
   })
 })
 
