@@ -31,6 +31,9 @@ services:
     environment:
       # This fork publishes matching optional Broker Packs with each version.
       OPENALICE_BROKER_PACK_BASE_URL: https://github.com/exynos967/OpenAlice/releases/download/broker-packs-latest
+      # Keep CLI and health-check loopback traffic out of the outbound proxy.
+      NO_PROXY: 127.0.0.1,localhost,::1
+      no_proxy: 127.0.0.1,localhost,::1
     # Keep stdin/tty open so `docker exec -it openalice claude` can run
     # the interactive OAuth flow.
     stdin_open: true
