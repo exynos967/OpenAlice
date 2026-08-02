@@ -31,6 +31,9 @@ import { assertBrokerPackRequirements } from './requirements.js'
 const DEFAULT_BASE_URL = 'https://download.openalice.ai'
 const MAX_PACK_BYTES = 512 * 1024 * 1024
 const INSTALL_LOCK_STALE_MS = 10 * 60 * 1000
+const FETCH_ATTEMPTS = 5
+const FETCH_RETRY_BASE_MS = 250
+const PROCESS_STARTED_AT_MS = Date.now() - process.uptime() * 1000
 
 export interface BrokerPackLocalStatus {
   engine: InstallableBrokerEngine | 'mock'
@@ -147,7 +150,7 @@ export async function installBrokerPack(engine: InstallableBrokerEngine): Promis
 }
 
 async function fetchCatalog(url: string): Promise<BrokerPackReleaseCatalog> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(20_000) })
+  const res = await fetchWithRetry(url, 20_000)
   if (!res.ok) throw new Error(`Broker-pack catalog request failed: HTTP ${res.status}`)
   const raw = await res.json() as Partial<BrokerPackReleaseCatalog>
   const version = getCurrentVersion()
@@ -248,13 +251,42 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 async function download(url: string, target: string, expectedSize: number): Promise<void> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(120_000) })
+  const res = await fetchWithRetry(url, 120_000)
   if (!res.ok || !res.body) throw new Error(`Broker-pack download failed: HTTP ${res.status}`)
   const declared = Number(res.headers.get('content-length') ?? 0)
   if (declared > MAX_PACK_BYTES || declared > expectedSize + 1024) throw new Error('Broker-pack download is larger than published metadata')
   await pipeline(Readable.fromWeb(res.body as never), createWriteStream(target, { flags: 'wx' }))
   const downloaded = (await stat(target)).size
   if (downloaded !== expectedSize) throw new Error(`Broker-pack size mismatch: expected ${expectedSize}, got ${downloaded}`)
+}
+
+async function fetchWithRetry(url: string, timeoutMs: number): Promise<Response> {
+  for (let attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++) {
+    try {
+      return await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+    } catch (err) {
+      if (attempt === FETCH_ATTEMPTS) throw err
+      const code = fetchErrorCode(err)
+      console.warn(
+        `[broker-packs] request failed${code ? ` (${code})` : ''}; retrying ` +
+        `(${attempt + 1}/${FETCH_ATTEMPTS})`,
+      )
+      await new Promise<void>((resolveDelay) => {
+        setTimeout(resolveDelay, FETCH_RETRY_BASE_MS * 2 ** (attempt - 1))
+      })
+    }
+  }
+  throw new Error('Broker-pack request exhausted without a result')
+}
+
+function fetchErrorCode(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined
+  const direct = (err as NodeJS.ErrnoException).code
+  if (typeof direct === 'string') return direct
+  const cause = (err as { cause?: unknown }).cause
+  if (!cause || typeof cause !== 'object') return undefined
+  const nested = (cause as NodeJS.ErrnoException).code
+  return typeof nested === 'string' ? nested : undefined
 }
 
 async function validateExtractedPackage(root: string, engine: InstallableBrokerEngine, asset: BrokerPackReleaseAsset): Promise<void> {
@@ -356,9 +388,14 @@ async function createInstallLock(lock: string): Promise<void> {
 
 async function isRecoverableInstallLock(lock: string): Promise<boolean> {
   try {
-    const owner = JSON.parse(await readFile(resolve(lock, 'owner.json'), 'utf8')) as { pid?: unknown }
+    const owner = JSON.parse(await readFile(resolve(lock, 'owner.json'), 'utf8')) as {
+      pid?: unknown
+      startedAt?: unknown
+    }
     if (Number.isSafeInteger(owner.pid) && Number(owner.pid) > 0) {
-      return !isProcessAlive(Number(owner.pid))
+      const ownerPid = Number(owner.pid)
+      if (ownerPid === process.pid && ownerPredatesCurrentProcess(owner.startedAt)) return true
+      return !isProcessAlive(ownerPid)
     }
   } catch {
     // An interrupted owner write is recoverable only after the directory ages.
@@ -368,6 +405,12 @@ async function isRecoverableInstallLock(lock: string): Promise<boolean> {
   } catch {
     return true
   }
+}
+
+function ownerPredatesCurrentProcess(startedAt: unknown): boolean {
+  if (typeof startedAt !== 'string') return false
+  const timestamp = Date.parse(startedAt)
+  return Number.isFinite(timestamp) && timestamp < PROCESS_STARTED_AT_MS
 }
 
 function isProcessAlive(pid: number): boolean {

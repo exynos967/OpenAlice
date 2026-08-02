@@ -37,6 +37,7 @@ afterEach(async () => {
     if (value === undefined) delete process.env[key]
     else process.env[key] = value
   }
+  vi.restoreAllMocks()
   vi.resetModules()
 })
 
@@ -110,6 +111,12 @@ async function publishCcxtPack(options: PublishedPackOptions = {}) {
 async function loadInstaller() {
   vi.resetModules()
   return import('./installer.js')
+}
+
+function connectTimeoutError(): TypeError {
+  return new TypeError('fetch failed', {
+    cause: Object.assign(new Error('Connect Timeout Error'), { code: 'UND_ERR_CONNECT_TIMEOUT' }),
+  })
 }
 
 async function seedCompatibleCcxtPack(version = '0.84.0-beta', apiVersion = 1) {
@@ -188,6 +195,43 @@ describe('broker-pack installer', () => {
     expect(await readFile(active!.entry, 'utf8')).toContain('API_VERSION = 1')
     expect(await readdir(resolve(brokerPackEngineRoot('ccxt'), 'releases'))).toHaveLength(1)
     expect(await readdir(brokerPackEngineRoot('ccxt'))).not.toContain('.install.lock')
+  })
+
+  it('retries a transient catalog connection failure', async () => {
+    await publishCcxtPack()
+    const catalogUrl = process.env['OPENALICE_BROKER_PACK_CATALOG_URL']!
+    const realFetch = globalThis.fetch
+    let failed = false
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (String(input) === catalogUrl && !failed) {
+        failed = true
+        throw connectTimeoutError()
+      }
+      return await realFetch(input, init)
+    })
+    const { installBrokerPack } = await loadInstaller()
+
+    await expect(installBrokerPack('ccxt')).resolves.toMatchObject({ installed: true })
+    expect(fetchSpy.mock.calls.filter(([input]) => String(input) === catalogUrl)).toHaveLength(2)
+  })
+
+  it('retries a transient broker-pack asset connection failure', async () => {
+    const published = await publishCcxtPack()
+    const catalogUrl = process.env['OPENALICE_BROKER_PACK_CATALOG_URL']!
+    const assetUrl = new URL(published.asset.file, catalogUrl).href
+    const realFetch = globalThis.fetch
+    let failed = false
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (String(input) === assetUrl && !failed) {
+        failed = true
+        throw connectTimeoutError()
+      }
+      return await realFetch(input, init)
+    })
+    const { installBrokerPack } = await loadInstaller()
+
+    await expect(installBrokerPack('ccxt')).resolves.toMatchObject({ installed: true })
+    expect(fetchSpy.mock.calls.filter(([input]) => String(input) === assetUrl)).toHaveLength(2)
   })
 
   it('reports and atomically reconciles a compatible Pack left by the previous app release', async () => {
@@ -355,6 +399,22 @@ describe('broker-pack installer', () => {
     const { installBrokerPack } = await loadInstaller()
 
     await expect(installBrokerPack('ccxt')).rejects.toThrow(/already running/i)
+  })
+
+  it('recovers a lock left by an earlier container process that reused this PID', async () => {
+    await publishCcxtPack()
+    const { brokerPackEngineRoot } = await import('../../core/broker-packs.js')
+    const lock = resolve(brokerPackEngineRoot('ccxt'), '.install.lock')
+    await mkdir(lock, { recursive: true })
+    const beforeThisProcess = new Date(Date.now() - process.uptime() * 1000 - 60_000)
+    await writeFile(resolve(lock, 'owner.json'), JSON.stringify({
+      pid: process.pid,
+      startedAt: beforeThisProcess.toISOString(),
+    }))
+    const { installBrokerPack } = await loadInstaller()
+
+    await expect(installBrokerPack('ccxt')).resolves.toMatchObject({ installed: true })
+    expect(await readdir(brokerPackEngineRoot('ccxt'))).not.toContain('.install.lock')
   })
 
   it('serializes simultaneous installs and leaves one valid active release', async () => {

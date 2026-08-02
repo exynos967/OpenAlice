@@ -150,6 +150,7 @@ ENV OPENALICE_APP_HOME=/app \
     AQ_LAUNCHER_ROOT=/data/workspaces \
     HOME=/data/home \
     NODE_ENV=production \
+    NODE_USE_ENV_PROXY=1 \
     OPENALICE_WEB_PORT=47331 \
     OPENALICE_MCP_PORT=47332 \
     OPENALICE_UTA_PORT=47333 \
