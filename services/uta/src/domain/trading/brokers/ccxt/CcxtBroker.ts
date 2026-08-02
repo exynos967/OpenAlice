@@ -989,7 +989,24 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
         }
       }
 
-      // ── 3. unrealizedPnL: display roll-up of open derivative PnL ───────────
+      // ── 3. Read exchange-specific non-trading product equity ─────────────
+      // Investment products such as Binance Simple Earn / RWUSD are absent
+      // from fetchBalance(). They count toward aggregate net liquidation, but
+      // are neither trading cash nor actionable positions/sub-accounts.
+      let supplementalEquity = new Decimal(0)
+      if (subAccountId === undefined && this.overrides.fetchSupplementalAccountEquity) {
+        try {
+          supplementalEquity = new Decimal(await this.overrides.fetchSupplementalAccountEquity(this.exchange))
+          if (!supplementalEquity.isFinite() || supplementalEquity.lt(0)) supplementalEquity = new Decimal(0)
+        } catch (err) {
+          console.warn(
+            `CcxtBroker[${this.id}]: supplemental account equity skipped — ${err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120)}`,
+          )
+          supplementalEquity = new Decimal(0)
+        }
+      }
+
+      // ── 4. unrealizedPnL: display roll-up of open derivative PnL ───────────
       // (already baked into the wallet equity above, so NOT re-added to netLiq).
       // Skipped for a spot-only scope — it has no derivative positions.
       let unrealizedPnL = new Decimal(0)
@@ -1006,7 +1023,7 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
 
       return {
         baseCurrency: 'USD',
-        netLiquidation: cash.plus(assetValue).toString(),
+        netLiquidation: cash.plus(assetValue).plus(supplementalEquity).toString(),
         totalCashValue: cash.toString(),
         unrealizedPnL: unrealizedPnL.toString(),
         realizedPnL: realizedPnL.toString(),

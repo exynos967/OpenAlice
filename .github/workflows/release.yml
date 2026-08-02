@@ -126,6 +126,7 @@ jobs:
         run: pnpm broker-packs:build
 
       - name: Prove previous-release Broker Pack upgrade
+        if: github.repository == 'TraderAlice/OpenAlice'
         run: pnpm broker-packs:upgrade-smoke -- --from "${{ needs.release.outputs.previous_tag }}"
 
       # macOS still uses dugite's embedded Git. Windows keeps only dugite's JS
@@ -378,6 +379,7 @@ jobs:
         run: pnpm broker-packs:build
 
       - name: Prove previous-release Broker Pack upgrade
+        if: github.repository == 'TraderAlice/OpenAlice'
         run: pnpm broker-packs:upgrade-smoke -- --from "${{ needs.release.outputs.previous_tag }}"
 
       - name: Preserve Linux Broker Packs
@@ -444,6 +446,26 @@ jobs:
             dist/release-broker-packs/*.tgz
             dist/release-headless-runtime/*.json
             dist/release-headless-runtime/*.tar.gz
+
+      - name: Publish fork Docker Broker Pack channel
+        if: github.repository == 'exynos967/OpenAlice'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CHANNEL=broker-packs-latest
+          if ! gh release view "$CHANNEL" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$CHANNEL" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --title "Latest Docker Broker Packs" \
+              --notes "Mutable Broker Pack channel used by this fork's Docker Compose deployment."
+          fi
+          gh release upload "$CHANNEL" \
+            dist/release-broker-packs/*.json \
+            dist/release-broker-packs/*.tgz \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
   mirror-release-assets:
     needs: [release, publish-release]

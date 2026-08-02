@@ -979,6 +979,107 @@ describe('CcxtBroker — getAccount', () => {
     expect(info.totalCashValue).toBe('9000')
     expect(info.initMarginReq).toBe('7')            // summed from the futures wallet's info
   })
+
+  it('adds Binance Simple Earn and RWUSD balances to aggregate netLiquidation', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {})
+
+    ;(acc as any).exchange.fetchBalance = vi.fn(async ({ type }: { type: string }) => {
+      if (type === 'spot') return { USDT: { total: 100 } }
+      return {}
+    })
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockResolvedValue([])
+    const fetchSimpleEarn = vi.fn().mockResolvedValue({ totalAmountInUSDT: '250.5' })
+    const request = vi.fn().mockResolvedValue({ rwusdAmount: '1000' })
+    ;(acc as any).exchange.sapiGetSimpleEarnAccount = fetchSimpleEarn
+    ;(acc as any).exchange.request = request
+
+    const info = await acc.getAccount()
+
+    expect(fetchSimpleEarn).toHaveBeenCalledWith({})
+    expect(request).toHaveBeenCalledWith('rwusd/account', 'sapi', 'GET', {})
+    expect(info.netLiquidation).toBe('1350.5')
+    expect(info.totalCashValue).toBe('100')
+  })
+
+  it('keeps Binance Earn balances out of the scoped spot trading account', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {})
+
+    ;(acc as any).exchange.fetchBalance = vi.fn().mockResolvedValue({ USDT: { total: 100 } })
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockResolvedValue([])
+    const fetchSimpleEarn = vi.fn().mockResolvedValue({ totalAmountInUSDT: '250.5' })
+    const request = vi.fn().mockResolvedValue({ rwusdAmount: '1000' })
+    ;(acc as any).exchange.sapiGetSimpleEarnAccount = fetchSimpleEarn
+    ;(acc as any).exchange.request = request
+
+    const info = await acc.getAccount('spot')
+
+    expect(fetchSimpleEarn).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
+    expect(info.netLiquidation).toBe('100')
+    expect(info.totalCashValue).toBe('100')
+  })
+
+  it('keeps readable Binance supplemental balances when another product endpoint fails', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {})
+
+    ;(acc as any).exchange.fetchBalance = vi.fn(async ({ type }: { type: string }) => {
+      if (type === 'spot') return { USDT: { total: 100 } }
+      return {}
+    })
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockResolvedValue([])
+    ;(acc as any).exchange.sapiGetSimpleEarnAccount = vi.fn().mockRejectedValue(
+      new Error('binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action"}'),
+    )
+    ;(acc as any).exchange.request = vi.fn().mockResolvedValue({ rwusdAmount: '1000' })
+
+    const info = await acc.getAccount()
+
+    expect(info.netLiquidation).toBe('1100')
+    expect(info.totalCashValue).toBe('100')
+  })
+
+  it('uses CCXT implicit RWUSD support when the installed CCXT version provides it', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {})
+
+    ;(acc as any).exchange.fetchBalance = vi.fn(async ({ type }: { type: string }) => {
+      if (type === 'spot') return { USDT: { total: 100 } }
+      return {}
+    })
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockResolvedValue([])
+    ;(acc as any).exchange.sapiGetSimpleEarnAccount = vi.fn().mockResolvedValue({ totalAmountInUSDT: '0' })
+    const fetchRwusd = vi.fn().mockResolvedValue({ rwusdAmount: '1000' })
+    const request = vi.fn()
+    ;(acc as any).exchange.sapiGetRwusdAccount = fetchRwusd
+    ;(acc as any).exchange.request = request
+
+    const info = await acc.getAccount()
+
+    expect(fetchRwusd).toHaveBeenCalledWith({})
+    expect(request).not.toHaveBeenCalled()
+    expect(info.netLiquidation).toBe('1100')
+  })
+
+  it('ignores invalid or negative Binance supplemental balance values', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {})
+
+    ;(acc as any).exchange.fetchBalance = vi.fn(async ({ type }: { type: string }) => {
+      if (type === 'spot') return { USDT: { total: 100 } }
+      return {}
+    })
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockResolvedValue([])
+    ;(acc as any).exchange.sapiGetSimpleEarnAccount = vi.fn().mockResolvedValue({ totalAmountInUSDT: 'not-a-number' })
+    ;(acc as any).exchange.request = vi.fn().mockResolvedValue({ rwusdAmount: '-5' })
+
+    const info = await acc.getAccount()
+
+    expect(info.netLiquidation).toBe('100')
+    expect(info.totalCashValue).toBe('100')
+  })
 })
 
 // ==================== sub-accounts ====================

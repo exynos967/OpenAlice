@@ -24,6 +24,7 @@
  */
 
 import type { Exchange, Order as CcxtOrder, Position as CcxtPosition } from 'ccxt'
+import { binanceOverrides } from './exchanges/binance.js'
 import { bybitOverrides } from './exchanges/bybit.js'
 import { hyperliquidOverrides } from './exchanges/hyperliquid.js'
 
@@ -109,6 +110,11 @@ export interface CcxtExchangeOverrides {
    *  fetch failure (e.g. an un-activated COIN-M wallet → -2015) is skipped, not
    *  fatal. */
   subAccounts?: CcxtSubAccountDef[]
+
+  /** Fetch non-trading product equity that is absent from CCXT fetchBalance().
+   *  The returned decimal string is added only to an aggregate account's
+   *  netLiquidation; it is intentionally excluded from cash and positions. */
+  fetchSupplementalAccountEquity?(exchange: Exchange): Promise<string>
 }
 
 /** One CCXT sub-account: a logical wallet aggregating CCXT balance `type`s. */
@@ -184,18 +190,6 @@ export async function defaultFetchAllOpenOrders(exchange: Exchange): Promise<Ccx
 }
 
 // ==================== Registry ====================
-
-/** Binance keeps spot / USDⓈ-M / COIN-M in separate wallets behind separate
- *  endpoints, so it splits into two trading sub-accounts: 'spot' (the spot
- *  wallet) and 'derivatives' (USDⓈ-M `future` + COIN-M `delivery`, merged).
- *  'delivery' is tolerated-on-failure — many accounts never activate COIN-M
- *  (ANG-111). Reads aggregate across both unless scoped; writes must name one. */
-const binanceOverrides: CcxtExchangeOverrides = {
-  subAccounts: [
-    { id: 'spot', label: 'Spot', kind: 'spot', walletTypes: ['spot'] },
-    { id: 'derivatives', label: 'Futures', kind: 'derivatives', walletTypes: ['future', 'delivery'] },
-  ],
-}
 
 export const exchangeOverrides: Record<string, CcxtExchangeOverrides> = {
   binance: binanceOverrides,
