@@ -115,10 +115,48 @@ async function waitForInstalledVersion(installRoot, expectedVersion, timeoutMs =
       )
       lastObservedVersion = observedVersion
       lastProgressAt = now
+      if (process.platform === 'win32') logWindowsUpgradeProcesses(installRoot)
     }
     await sleep(500)
   }
   throw new Error(`timed out waiting for installed OpenAlice ${expectedVersion} under ${installRoot}`)
+}
+
+function logWindowsUpgradeProcesses(installRoot) {
+  const powershell = join(
+    process.env['SystemRoot'] || 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  )
+  const script = [
+    "$root = [IO.Path]::GetFullPath($env:OPENALICE_UPGRADE_INSTALL_ROOT);",
+    'Get-CimInstance -ClassName Win32_Process',
+    '| Where-Object {',
+    "  ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($root, [StringComparison]::OrdinalIgnoreCase))",
+    "  -or $_.Name -like 'OpenAlice*'",
+    "  -or $_.Name -eq 'old-uninstaller.exe'",
+    '}',
+    '| Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine',
+    '| ConvertTo-Json -Compress',
+  ].join(' ')
+  const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8',
+    timeout: 15_000,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      OPENALICE_UPGRADE_INSTALL_ROOT: installRoot,
+    },
+  })
+  const output = result.stdout?.trim()
+  if (result.status === 0) {
+    console.log(`[desktop-upgrade] Windows process snapshot: ${output || '[]'}`)
+  } else {
+    const detail = result.error?.message || result.stderr?.trim() || `exit ${result.status ?? 'unknown'}`
+    console.log(`[desktop-upgrade] Windows process snapshot unavailable: ${detail}`)
+  }
 }
 
 async function spawnDetached(command, args) {
@@ -128,16 +166,48 @@ async function spawnDetached(command, args) {
     child.once('spawn', resolveSpawn)
     child.once('error', rejectSpawn)
   })
-  child.unref()
+  return child
+}
+
+async function waitForInstallerExit(child, installRoot, timeoutMs = 10 * 60_000) {
+  const startedAt = Date.now()
+  const deadline = startedAt + timeoutMs
+  let lastProgressAt = 0
+  while (child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
+    const now = Date.now()
+    if (now - lastProgressAt >= 30_000) {
+      console.log(
+        `[desktop-upgrade] waiting for detached installer pid=${child.pid ?? '<unknown>'}: ` +
+        `elapsed=${Math.round((now - startedAt) / 1000)}s`,
+      )
+      if (process.platform === 'win32') logWindowsUpgradeProcesses(installRoot)
+      lastProgressAt = now
+    }
+    await sleep(500)
+  }
+  if (child.exitCode === null && child.signalCode === null) {
+    terminateTree(child)
+    throw new Error(`timed out waiting for detached installer pid=${child.pid ?? '<unknown>'}`)
+  }
+  if (child.exitCode !== 0) {
+    throw new Error(
+      `detached installer exited ${child.exitCode ?? 'unknown'}` +
+      `${child.signalCode ? ` (${child.signalCode})` : ''}`,
+    )
+  }
+  console.log(`[desktop-upgrade] detached installer exited 0`)
 }
 
 async function installWindows(archive, installRoot, isUpdate = false) {
   mkdirSync(dirname(installRoot), { recursive: true })
   const args = windowsInstallerArgs(installRoot, isUpdate)
   if (isUpdate) {
-    // NsisUpdater starts the installer detached, then quits Electron. Waiting for
-    // the detached NSIS process itself can hang after its files are installed.
-    await spawnDetached(archive, args)
+    // NsisUpdater starts the installer detached, then quits Electron. The app
+    // tree can expose its new package.json before NSIS finishes writing files,
+    // shortcuts, and uninstall metadata, so do not launch the candidate until
+    // the detached installer has actually completed.
+    const installer = await spawnDetached(archive, args)
+    await waitForInstallerExit(installer, installRoot)
     await waitForInstalledVersion(installRoot, candidateVersion)
   } else {
     run(archive, args)
