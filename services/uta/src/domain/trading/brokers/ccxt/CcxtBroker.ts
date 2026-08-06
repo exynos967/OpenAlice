@@ -900,10 +900,18 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
       const info = (b['info'] ?? {}) as Record<string, unknown>
       if (info['totalInitialMargin'] !== undefined) initMargin = initMargin.plus(new Decimal(String(info['totalInitialMargin'])))
     }
+    const readWallet = async (type?: string): Promise<Record<string, unknown>> => {
+      const balance = type === undefined
+        ? await this.exchange.fetchBalance() as unknown as Record<string, unknown>
+        : await this.exchange.fetchBalance({ type }) as unknown as Record<string, unknown>
+      return this.overrides.augmentWalletBalance
+        ? this.overrides.augmentWalletBalance(this.exchange, type, balance)
+        : balance
+    }
     if (walletTypes?.length) {
       for (const type of walletTypes) {
         try {
-          accrue(await this.exchange.fetchBalance({ type }) as unknown as Record<string, unknown>)
+          accrue(await readWallet(type))
           if (type === requiredWalletType) requiredWalletRead = true
         } catch (err) {
           if (type === requiredWalletType) requiredWalletError = err
@@ -911,7 +919,7 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
         }
       }
     } else {
-      accrue(await this.exchange.fetchBalance() as unknown as Record<string, unknown>)
+      accrue(await readWallet())
     }
     if (!requiredWalletRead) {
       throw BrokerError.from(

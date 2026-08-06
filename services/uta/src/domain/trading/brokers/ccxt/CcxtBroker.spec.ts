@@ -1059,6 +1059,68 @@ describe('CcxtBroker — getAccount', () => {
     )
   })
 
+  it('adds active Binance Dual Investment holdings and equity without counting settled history', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {})
+
+    ;(acc as any).exchange.fetchBalance = vi.fn(async ({ type }: { type: string }) => {
+      if (type === 'spot') return { USDT: { total: 100 } }
+      return {}
+    })
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockResolvedValue([])
+    ;(acc as any).exchange.sapiGetSimpleEarnAccount = vi.fn().mockResolvedValue({ totalAmountInUSDT: '0' })
+    ;(acc as any).exchange.sapiGetSimpleEarnFlexiblePosition = vi.fn().mockResolvedValue({ rows: [], total: 0 })
+    ;(acc as any).exchange.sapiGetSimpleEarnLockedPosition = vi.fn().mockResolvedValue({ rows: [], total: 0 })
+    ;(acc as any).exchange.sapiGetRwusdAccount = vi.fn().mockResolvedValue({ rwusdAmount: '0' })
+    const fetchDualAccount = vi.fn().mockResolvedValue({ totalAmountInUSDT: '250' })
+    const fetchDualPositions = vi.fn().mockResolvedValue({
+      total: 3,
+      list: [
+        {
+          investCoin: 'usdt',
+          subscriptionAmount: '100',
+          purchaseStatus: 'PURCHASE_SUCCESS',
+          apr: '0.24',
+        },
+        {
+          investCoin: 'btc',
+          subscriptionAmount: '0.002',
+          purchaseStatus: 'SETTLING',
+          apr: '0.18',
+        },
+        {
+          investCoin: 'usdt',
+          subscriptionAmount: '50',
+          purchaseStatus: 'SETTLED',
+          apr: '0.12',
+        },
+      ],
+    })
+    ;(acc as any).exchange.sapiGetDciProductAccounts = fetchDualAccount
+    ;(acc as any).exchange.sapiGetDciProductPositions = fetchDualPositions
+
+    const info = await acc.getAccount()
+
+    expect(fetchDualAccount).toHaveBeenCalledWith({})
+    expect(fetchDualPositions).toHaveBeenCalledWith({ page: 1, size: 100 })
+    expect(info.netLiquidation).toBe('350')
+    expect(info.totalCashValue).toBe('100')
+    expect(info.investments).toEqual([
+      {
+        product: 'dual-investment',
+        asset: 'USDT',
+        amount: '100',
+        annualPercentageRate: '0.24',
+      },
+      {
+        product: 'dual-investment',
+        asset: 'BTC',
+        amount: '0.002',
+        annualPercentageRate: '0.18',
+      },
+    ])
+  })
+
   it('keeps already-read Binance Earn holdings when a later page fails', async () => {
     const acc = makeAccount({ exchange: 'binance' })
     setInitialized(acc, {})
@@ -1267,6 +1329,36 @@ describe('CcxtBroker — sub-accounts', () => {
     expect(fb).toHaveBeenCalledWith({ type: 'spot' })
     expect(positions).toHaveLength(1)
     expect(positions[0].marketValue).toBe('30000')   // 0.5 BTC @ 60000
+  })
+
+  it('supplements Binance spot holdings missing from fetchBalance without double counting existing assets', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    setInitialized(acc, {
+      'BTC/USDT': makeSpotMarket('BTC', 'USDT', 'BTC/USDT'),
+      'NVDAB/USDT': makeSpotMarket('NVDAB', 'USDT', 'NVDAB/USDT'),
+    })
+
+    ;(acc as any).exchange.fetchBalance = vi.fn().mockResolvedValue({ BTC: { total: '0.5' } })
+    const fetchUserAsset = vi.fn().mockResolvedValue([
+      { asset: 'BTC', free: '9', locked: '0', freeze: '0', withdrawing: '0' },
+      { asset: 'NVDAB', free: '2.5', locked: '0.5', freeze: '0', withdrawing: '0' },
+      { asset: 'RWUSD', free: '1000', locked: '0', freeze: '0', withdrawing: '0' },
+    ])
+    ;(acc as any).exchange.sapiV3PostAssetGetUserAsset = fetchUserAsset
+    ;(acc as any).exchange.fetchPositions = vi.fn().mockResolvedValue([])
+    ;(acc as any).exchange.fetchTickers = vi.fn().mockResolvedValue({
+      'BTC/USDT': { last: 60000 },
+      'NVDAB/USDT': { last: 220 },
+    })
+
+    const positions = await acc.getPositions('spot')
+
+    expect(fetchUserAsset).toHaveBeenCalledWith({})
+    expect(positions).toHaveLength(2)
+    expect(positions.find(position => position.contract.symbol === 'BTC')?.quantity.toString()).toBe('0.5')
+    const nvdab = positions.find(position => position.contract.symbol === 'NVDAB')
+    expect(nvdab?.quantity.toString()).toBe('3')
+    expect(nvdab?.marketValue).toBe('660')
   })
 
   it('getPositions(derivatives) fetches positions, scoped to futures wallets (binance)', async () => {

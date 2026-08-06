@@ -112,6 +112,15 @@ export interface CcxtExchangeOverrides {
    *  fatal. */
   subAccounts?: CcxtSubAccountDef[]
 
+  /** Add venue-specific assets omitted by CCXT's unified wallet response.
+   *  Implementations must preserve the original balance and avoid counting an
+   *  asset twice when both sources return it. */
+  augmentWalletBalance?(
+    exchange: Exchange,
+    walletType: string | undefined,
+    balance: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>
+
   /** Fetch non-trading products that are absent from CCXT fetchBalance().
    *  Equity is added only to an aggregate account's netLiquidation. Holdings
    *  remain read-only account metadata and never enter tradeable positions. */

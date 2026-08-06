@@ -250,7 +250,7 @@ export interface OpenOrder {
 
 /** Read-only investment product that contributes to account equity. */
 export interface InvestmentHolding {
-  /** Venue product family, e.g. `simple-earn-flexible` or `rwusd`. */
+  /** Venue product family, e.g. `simple-earn-flexible`, `rwusd`, or `dual-investment`. */
   product: string
   /** Asset in which `amount` is denominated. */
   asset: string

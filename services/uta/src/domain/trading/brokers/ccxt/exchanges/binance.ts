@@ -2,8 +2,9 @@
  * Binance-specific overrides for CcxtBroker.
  *
  * Binance separates trading wallets from investment products. CCXT's unified
- * fetchBalance() covers Spot / USDⓈ-M / COIN-M, while Simple Earn and RWUSD
- * require signed SAPI endpoints and must be folded into aggregate equity.
+ * fetchBalance() covers Spot / USDⓈ-M / COIN-M, while Simple Earn, RWUSD, and
+ * Dual Investment require signed SAPI endpoints and must be folded into
+ * aggregate equity.
  */
 
 import Decimal from 'decimal.js'
@@ -17,6 +18,9 @@ type BinanceExchange = Exchange & {
   sapiGetSimpleEarnLockedPosition?: (params?: Record<string, unknown>) => Promise<unknown>
   sapiGetRwusdAccount?: (params?: Record<string, unknown>) => Promise<unknown>
   sapiGetRwusdHistoryRateHistory?: (params?: Record<string, unknown>) => Promise<unknown>
+  sapiGetDciProductAccounts?: (params?: Record<string, unknown>) => Promise<unknown>
+  sapiGetDciProductPositions?: (params?: Record<string, unknown>) => Promise<unknown>
+  sapiV3PostAssetGetUserAsset?: (params?: Record<string, unknown>) => Promise<unknown>
 }
 
 const PAGE_SIZE = 100
@@ -48,6 +52,11 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function rows(response: unknown): Record<string, unknown>[] {
   const value = record(response)?.['rows']
+  return Array.isArray(value) ? value.map(record).filter((row): row is Record<string, unknown> => row !== null) : []
+}
+
+function list(response: unknown): Record<string, unknown>[] {
+  const value = record(response)?.['list']
   return Array.isArray(value) ? value.map(record).filter((row): row is Record<string, unknown> => row !== null) : []
 }
 
@@ -189,30 +198,157 @@ async function fetchRwusd(exchange: BinanceExchange): Promise<{
   }
 }
 
-/** Binance keeps trading wallets as scoped sub-accounts, but Simple Earn and
- * RWUSD are read-only investment products and only contribute to aggregate
- * account equity. Product failures are isolated so Spot remains usable. */
+const ACTIVE_DUAL_INVESTMENT_STATUSES = new Set([
+  'PENDING',
+  'PURCHASE_SUCCESS',
+  'SETTLING',
+  'REFUNDING',
+])
+
+async function fetchDualInvestmentHoldings(exchange: BinanceExchange): Promise<InvestmentHolding[]> {
+  const result: InvestmentHolding[] = []
+  try {
+    for (let page = 1; page <= MAX_PAGES; page += 1) {
+      const params = { page, size: PAGE_SIZE }
+      const response = exchange.sapiGetDciProductPositions
+        ? await exchange.sapiGetDciProductPositions(params)
+        : await exchange.request('dci/product/positions', 'sapi', 'GET', params)
+      const positions = list(response)
+
+      for (const position of positions) {
+        const status = typeof position['purchaseStatus'] === 'string'
+          ? position['purchaseStatus'].trim().toUpperCase()
+          : ''
+        if (!ACTIVE_DUAL_INVESTMENT_STATUSES.has(status)) continue
+
+        const asset = typeof position['investCoin'] === 'string'
+          ? position['investCoin'].trim().toUpperCase()
+          : ''
+        if (!asset) continue
+        const amount = optionalAmount(position, 'subscriptionAmount', 'Dual Investment holding')
+        if (amount.lte(0)) continue
+        const annualPercentageRate = optionalRate(position['apr'])
+        result.push({
+          product: 'dual-investment',
+          asset,
+          amount: amount.toString(),
+          ...(annualPercentageRate === undefined ? {} : { annualPercentageRate }),
+        })
+      }
+
+      const rawTotal = record(response)?.['total']
+      const total = rawTotal === undefined ? Number.NaN : Number(rawTotal)
+      if (positions.length < PAGE_SIZE || (Number.isFinite(total) && page * PAGE_SIZE >= total)) return result
+    }
+    console.warn(`CcxtBroker[binance]: Dual Investment positions truncated after ${MAX_PAGES * PAGE_SIZE} rows`)
+    return result
+  } catch (err) {
+    warnUnavailable('Dual Investment positions', err)
+    return result
+  }
+}
+
+async function fetchDualInvestment(exchange: BinanceExchange): Promise<{
+  equity: Decimal
+  investments: InvestmentHolding[]
+}> {
+  const [equity, investments] = await Promise.all([
+    (async (): Promise<Decimal> => {
+      try {
+        const response = exchange.sapiGetDciProductAccounts
+          ? await exchange.sapiGetDciProductAccounts({})
+          : await exchange.request('dci/product/accounts', 'sapi', 'GET', {})
+        return optionalAmount(response, 'totalAmountInUSDT', 'Dual Investment')
+      } catch (err) {
+        warnUnavailable('Dual Investment', err)
+        return new Decimal(0)
+      }
+    })(),
+    fetchDualInvestmentHoldings(exchange),
+  ])
+  return { equity, investments }
+}
+
+function balanceTotal(balance: Record<string, unknown> | null): Decimal {
+  if (balance === null) return new Decimal(0)
+  const total = optionalAmount(balance, 'total', 'spot wallet')
+  if (total.gt(0)) return total
+  return optionalAmount(balance, 'free', 'spot wallet').plus(optionalAmount(balance, 'used', 'spot wallet'))
+}
+
+async function augmentBinanceSpotBalance(
+  exchange: BinanceExchange,
+  walletType: string | undefined,
+  balance: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (walletType !== 'spot') return balance
+
+  try {
+    const response = exchange.sapiV3PostAssetGetUserAsset
+      ? await exchange.sapiV3PostAssetGetUserAsset({})
+      : await exchange.request('asset/getUserAsset', 'sapiV3', 'POST', {})
+    if (!Array.isArray(response)) return balance
+
+    const marketAssets = new Set(
+      Object.values(exchange.markets ?? {})
+        .filter(market => market.active !== false
+          && market.type === 'spot'
+          && ['USDT', 'USDC', 'USD'].includes(String(market.quote ?? '').toUpperCase()))
+        .map(market => String(market.base ?? '').toUpperCase())
+        .filter(Boolean),
+    )
+    const augmented = { ...balance }
+    for (const value of response) {
+      const assetRow = record(value)
+      const asset = typeof assetRow?.['asset'] === 'string' ? assetRow['asset'].trim().toUpperCase() : ''
+      if (!asset || !marketAssets.has(asset) || balanceTotal(record(augmented[asset])).gt(0)) continue
+
+      const free = optionalAmount(assetRow, 'free', `${asset} User Asset`)
+      const used = optionalAmount(assetRow, 'locked', `${asset} User Asset`)
+        .plus(optionalAmount(assetRow, 'freeze', `${asset} User Asset`))
+        .plus(optionalAmount(assetRow, 'withdrawing', `${asset} User Asset`))
+      const total = free.plus(used)
+      if (total.lte(0)) continue
+      augmented[asset] = { free: free.toString(), used: used.toString(), total: total.toString() }
+    }
+    return augmented
+  } catch (err) {
+    warnUnavailable('User Asset supplement', err)
+    return balance
+  }
+}
+
+/** Binance keeps trading wallets as scoped sub-accounts, but Simple Earn,
+ * RWUSD, and Dual Investment are read-only investment products and only
+ * contribute to aggregate account equity. Product failures are isolated so
+ * Spot remains usable. */
 export const binanceOverrides: CcxtExchangeOverrides = {
   subAccounts: [
     { id: 'spot', label: 'Spot', kind: 'spot', walletTypes: ['spot'] },
     { id: 'derivatives', label: 'Futures', kind: 'derivatives', walletTypes: ['future', 'delivery'] },
   ],
 
+  augmentWalletBalance(exchange, walletType, balance): Promise<Record<string, unknown>> {
+    return augmentBinanceSpotBalance(exchange as BinanceExchange, walletType, balance)
+  },
+
   async fetchSupplementalAccount(exchange: Exchange): Promise<{
     equity: string
     investments: InvestmentHolding[]
   }> {
     const binance = exchange as BinanceExchange
-    const [simpleEarnEquity, simpleEarnHoldings, rwusd] = await Promise.all([
+    const [simpleEarnEquity, simpleEarnHoldings, rwusd, dualInvestment] = await Promise.all([
       fetchSimpleEarnEquity(binance),
       fetchSimpleEarnHoldings(binance),
       fetchRwusd(binance),
+      fetchDualInvestment(binance),
     ])
     return {
-      equity: simpleEarnEquity.plus(rwusd.equity).toString(),
+      equity: simpleEarnEquity.plus(rwusd.equity).plus(dualInvestment.equity).toString(),
       investments: [
         ...simpleEarnHoldings,
         ...(rwusd.investment === null ? [] : [rwusd.investment]),
+        ...dualInvestment.investments,
       ],
     }
   },
