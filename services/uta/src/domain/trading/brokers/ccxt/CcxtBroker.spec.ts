@@ -1169,7 +1169,8 @@ describe('CcxtBroker — getAccount', () => {
     const info = await acc.getAccount('spot')
 
     expect(fetchSimpleEarn).not.toHaveBeenCalled()
-    expect(request).not.toHaveBeenCalled()
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(request).toHaveBeenCalledWith('asset/get-funding-asset', 'sapi', 'POST', {})
     expect(info.netLiquidation).toBe('100')
     expect(info.totalCashValue).toBe('100')
   })
@@ -1339,12 +1340,12 @@ describe('CcxtBroker — sub-accounts', () => {
     })
 
     ;(acc as any).exchange.fetchBalance = vi.fn().mockResolvedValue({ BTC: { total: '0.5' } })
-    const fetchUserAsset = vi.fn().mockResolvedValue([
+    const fetchFundingAsset = vi.fn().mockResolvedValue([
       { asset: 'BTC', free: '9', locked: '0', freeze: '0', withdrawing: '0' },
       { asset: 'NVDAB', free: '2.5', locked: '0.5', freeze: '0', withdrawing: '0' },
       { asset: 'RWUSD', free: '1000', locked: '0', freeze: '0', withdrawing: '0' },
     ])
-    ;(acc as any).exchange.sapiV3PostAssetGetUserAsset = fetchUserAsset
+    ;(acc as any).exchange.sapiPostAssetGetFundingAsset = fetchFundingAsset
     ;(acc as any).exchange.fetchPositions = vi.fn().mockResolvedValue([])
     ;(acc as any).exchange.fetchTickers = vi.fn().mockResolvedValue({
       'BTC/USDT': { last: 60000 },
@@ -1353,7 +1354,7 @@ describe('CcxtBroker — sub-accounts', () => {
 
     const positions = await acc.getPositions('spot')
 
-    expect(fetchUserAsset).toHaveBeenCalledWith({})
+    expect(fetchFundingAsset).toHaveBeenCalledWith({})
     expect(positions).toHaveLength(2)
     expect(positions.find(position => position.contract.symbol === 'BTC')?.quantity.toString()).toBe('0.5')
     const nvdab = positions.find(position => position.contract.symbol === 'NVDAB')

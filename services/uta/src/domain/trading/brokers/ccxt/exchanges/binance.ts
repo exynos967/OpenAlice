@@ -20,7 +20,7 @@ type BinanceExchange = Exchange & {
   sapiGetRwusdHistoryRateHistory?: (params?: Record<string, unknown>) => Promise<unknown>
   sapiGetDciProductAccounts?: (params?: Record<string, unknown>) => Promise<unknown>
   sapiGetDciProductPositions?: (params?: Record<string, unknown>) => Promise<unknown>
-  sapiV3PostAssetGetUserAsset?: (params?: Record<string, unknown>) => Promise<unknown>
+  sapiPostAssetGetFundingAsset?: (params?: Record<string, unknown>) => Promise<unknown>
 }
 
 const PAGE_SIZE = 100
@@ -284,9 +284,9 @@ async function augmentBinanceSpotBalance(
   if (walletType !== 'spot') return balance
 
   try {
-    const response = exchange.sapiV3PostAssetGetUserAsset
-      ? await exchange.sapiV3PostAssetGetUserAsset({})
-      : await exchange.request('asset/getUserAsset', 'sapiV3', 'POST', {})
+    const response = exchange.sapiPostAssetGetFundingAsset
+      ? await exchange.sapiPostAssetGetFundingAsset({})
+      : await exchange.request('asset/get-funding-asset', 'sapi', 'POST', {})
     if (!Array.isArray(response)) return balance
 
     const marketAssets = new Set(
@@ -313,7 +313,7 @@ async function augmentBinanceSpotBalance(
     }
     return augmented
   } catch (err) {
-    warnUnavailable('User Asset supplement', err)
+    warnUnavailable('Funding Wallet supplement', err)
     return balance
   }
 }
