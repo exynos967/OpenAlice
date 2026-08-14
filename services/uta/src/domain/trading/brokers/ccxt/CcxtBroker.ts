@@ -266,6 +266,7 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
     // request — loadMarkets() in init() is the first network call. CCXT won't
     // pick up HTTP(S)_PROXY env on its own. See issue #384.
     applyEnvProxy(this.exchange)
+    this.overrides.configureExchange?.(this.exchange)
 
     if (config.sandbox) {
       try {

@@ -1,6 +1,6 @@
 {
   "name": "@traderalice/openalice-cli",
-  "version": "0.89.5-beta",
+  "version": "0.89.6-beta",
   "description": "OpenAlice local runtime and remote connection CLI",
   "type": "module",
   "bin": {

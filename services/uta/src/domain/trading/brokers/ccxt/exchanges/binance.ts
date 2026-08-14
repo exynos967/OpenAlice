@@ -323,6 +323,16 @@ async function augmentBinanceSpotBalance(
  * contribute to aggregate account equity. Product failures are isolated so
  * Spot remains usable. */
 export const binanceOverrides: CcxtExchangeOverrides = {
+  configureExchange(exchange): void {
+    // CCXT defaults both flags to true when credentials are present, which
+    // makes loadMarkets() depend on signed Capital and Margin SAPI endpoints.
+    // Market discovery only needs the public exchange-info endpoints; private
+    // readability is verified separately by getAccount().
+    const options = exchange.options as Record<string, unknown>
+    options['fetchCurrencies'] = false
+    options['fetchMargins'] = false
+  },
+
   subAccounts: [
     { id: 'spot', label: 'Spot', kind: 'spot', walletTypes: ['spot'] },
     { id: 'derivatives', label: 'Futures', kind: 'derivatives', walletTypes: ['future', 'delivery'] },

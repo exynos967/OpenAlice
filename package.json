@@ -1,6 +1,6 @@
 {
   "name": "open-alice",
-  "version": "0.89.5-beta",
+  "version": "0.89.6-beta",
   "description": "File-based trading agent engine",
   "type": "module",
   "main": "dist/electron/main.js",

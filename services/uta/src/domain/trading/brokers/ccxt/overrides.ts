@@ -36,6 +36,9 @@ import { hyperliquidOverrides } from './exchanges/hyperliquid.js'
 type DefaultImpl<TArgs extends unknown[], TResult> = (...args: TArgs) => Promise<TResult>
 
 export interface CcxtExchangeOverrides {
+  /** Apply exchange-specific CCXT options before the first network request. */
+  configureExchange?(exchange: Exchange): void
+
   /** Fail account reads when one of the wallets or position namespaces this
    *  adapter claims to aggregate is unreadable. Use only where a partial read
    *  would look valid while hiding material funds or risk. */

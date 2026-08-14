@@ -106,6 +106,13 @@ describe('CcxtBroker — constructor', () => {
     expect(acc.meta).toEqual({ exchange: 'bybit' })
   })
 
+  it('keeps Binance market discovery off private Capital and Margin endpoints', () => {
+    const exchange = (makeAccount({ exchange: 'binance' }) as any).exchange
+
+    expect(exchange.options.fetchCurrencies).toBe(false)
+    expect(exchange.options.fetchMargins).toBe(false)
+  })
+
   it('defaults id to exchange-main', () => {
     const acc = makeAccount()
     expect(acc.id).toBe('bybit-main')
