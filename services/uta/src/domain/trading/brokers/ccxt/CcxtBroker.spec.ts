@@ -919,6 +919,25 @@ describe('CcxtBroker — getAccount', () => {
     await expect(acc.init()).rejects.toThrow(/requires credentials/)
   })
 
+  it('forces a fresh CCXT market load after an initial loadMarkets failure', async () => {
+    const acc = makeAccount({ exchange: 'binance' })
+    const exchange = (acc as any).exchange
+    exchange.checkRequiredCredentials = vi.fn()
+    exchange.requiredCredentials = {}
+    exchange.markets = { 'BTC/USDT': makeSpotMarket('BTC', 'USDT', 'BTC/USDT') }
+    exchange.loadMarkets = vi.fn()
+      .mockRejectedValueOnce(new Error('capital/config/getall?timestamp=1 fetch failed'))
+      .mockResolvedValueOnce(exchange.markets)
+
+    await expect(acc.init()).rejects.toThrow(/timestamp=1 fetch failed/)
+    await expect(acc.init()).resolves.toBeUndefined()
+    await expect(acc.init()).resolves.toBeUndefined()
+
+    expect(exchange.loadMarkets).toHaveBeenNthCalledWith(1, false)
+    expect(exchange.loadMarkets).toHaveBeenNthCalledWith(2, true)
+    expect(exchange.loadMarkets).toHaveBeenCalledTimes(2)
+  })
+
   it('sums all stablecoins (USDT + USDC + FDUSD) into totalCashValue', async () => {
     const acc = makeAccount()
     setInitialized(acc, {})

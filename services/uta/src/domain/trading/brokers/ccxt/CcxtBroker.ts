@@ -228,6 +228,8 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
   /** Public-data-only mode — skip credential validation in init(). */
   private keyless: boolean
   private initialized = false
+  private marketLoadAttempted = false
+  private fetchMarketsWrapped = false
   private overrides: CcxtExchangeOverrides
   // orderId → ccxtSymbol cache (CCXT needs symbol to cancel)
   private orderSymbolCache = new Map<string, string>()
@@ -310,6 +312,8 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
   // ---- Lifecycle ----
 
   async init(): Promise<void> {
+    if (this.initialized) return
+
     // Keyless (public-data-only) accounts skip credential validation — they
     // only ever call public endpoints (loadMarkets / fetchOHLCV / fetchTicker).
     // Validate credentials per the exchange's own requiredCredentials map otherwise.
@@ -327,65 +331,73 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
       )
     }
 
-    const origFetchMarkets = this.exchange.fetchMarkets.bind(this.exchange)
-    const accountId = this.id
+    if (!this.fetchMarketsWrapped) {
+      const origFetchMarkets = this.exchange.fetchMarkets.bind(this.exchange)
+      const accountId = this.id
 
-    this.exchange.fetchMarkets = async (params?: Record<string, unknown>) => {
-      const ex = this.exchange as unknown as Record<string, unknown>
-      const opts = (ex['options'] ?? {}) as Record<string, unknown>
-      const fmOpts = (opts['fetchMarkets'] ?? {}) as Record<string, unknown>
-      // Use the exchange's own default types (set in its CCXT class describe()).
-      // Skip 'option' type — option markets are typically thousands of contracts
-      // (Bybit alone has ~10k+) and rarely useful for automated trading.
-      const originalTypes = fmOpts['types']
-      const allTypes = (originalTypes ?? []) as string[]
-      const types = allTypes.length > 0
-        ? allTypes.filter(t => t !== 'option')
-        : ['spot', 'linear', 'inverse'] // fallback for exchanges that don't declare types
+      this.exchange.fetchMarkets = async (params?: Record<string, unknown>) => {
+        const ex = this.exchange as unknown as Record<string, unknown>
+        const opts = (ex['options'] ?? {}) as Record<string, unknown>
+        const fmOpts = (opts['fetchMarkets'] ?? {}) as Record<string, unknown>
+        // Use the exchange's own default types (set in its CCXT class describe()).
+        // Skip 'option' type — option markets are typically thousands of contracts
+        // (Bybit alone has ~10k+) and rarely useful for automated trading.
+        const originalTypes = fmOpts['types']
+        const allTypes = (originalTypes ?? []) as string[]
+        const types = allTypes.length > 0
+          ? allTypes.filter(t => t !== 'option')
+          : ['spot', 'linear', 'inverse'] // fallback for exchanges that don't declare types
 
-      try {
-        const allMarkets: unknown[] = []
-        for (const type of types) {
-          let lastErr: unknown
-          let success = false
-          for (let attempt = 1; attempt <= MAX_INIT_RETRIES; attempt++) {
-            try {
-              fmOpts['types'] = [type]
-              const markets = await origFetchMarkets(params)
-              allMarkets.push(...markets)
-              success = true
-              break
-            } catch (err) {
-              lastErr = err
-              if (attempt < MAX_INIT_RETRIES) {
-                const delay = INIT_RETRY_BASE_MS * Math.pow(2, attempt - 1)
-                const msg = err instanceof Error ? err.message : String(err)
-                console.warn(`CcxtBroker[${accountId}]: fetchMarkets(${type}) attempt ${attempt}/${MAX_INIT_RETRIES} failed, retrying in ${delay}ms... (${msg.slice(0, 160)})`)
-                await new Promise(r => setTimeout(r, delay))
+        try {
+          const allMarkets: unknown[] = []
+          for (const type of types) {
+            let lastErr: unknown
+            let success = false
+            for (let attempt = 1; attempt <= MAX_INIT_RETRIES; attempt++) {
+              try {
+                fmOpts['types'] = [type]
+                const markets = await origFetchMarkets(params)
+                allMarkets.push(...markets)
+                success = true
+                break
+              } catch (err) {
+                lastErr = err
+                if (attempt < MAX_INIT_RETRIES) {
+                  const delay = INIT_RETRY_BASE_MS * Math.pow(2, attempt - 1)
+                  const msg = err instanceof Error ? err.message : String(err)
+                  console.warn(`CcxtBroker[${accountId}]: fetchMarkets(${type}) attempt ${attempt}/${MAX_INIT_RETRIES} failed, retrying in ${delay}ms... (${msg.slice(0, 160)})`)
+                  await new Promise(r => setTimeout(r, delay))
+                }
               }
             }
+            if (!success) {
+              // A CCXT account is a full-spectrum interface — every market type
+              // the exchange supports must load, or the broker refuses to come
+              // up. Silently dropping a type (e.g. spot) would understate
+              // netLiquidation and hide real holdings, producing wrong snapshots
+              // forever until process restart. Whether the user actively trades
+              // that type is their decision, not ours.
+              const msg = lastErr instanceof Error ? lastErr.message : String(lastErr)
+              throw new Error(
+                `CcxtBroker[${accountId}]: fetchMarkets(${type}) failed after ${MAX_INIT_RETRIES} attempts: ${msg}`,
+              )
+            }
           }
-          if (!success) {
-            // A CCXT account is a full-spectrum interface — every market type
-            // the exchange supports must load, or the broker refuses to come
-            // up. Silently dropping a type (e.g. spot) would understate
-            // netLiquidation and hide real holdings, producing wrong snapshots
-            // forever until process restart. Whether the user actively trades
-            // that type is their decision, not ours.
-            const msg = lastErr instanceof Error ? lastErr.message : String(lastErr)
-            throw new Error(
-              `CcxtBroker[${accountId}]: fetchMarkets(${type}) failed after ${MAX_INIT_RETRIES} attempts: ${msg}`,
-            )
-          }
+          return allMarkets as Awaited<ReturnType<Exchange['fetchMarkets']>>
+        } finally {
+          fmOpts['types'] = originalTypes
         }
-        return allMarkets as Awaited<ReturnType<Exchange['fetchMarkets']>>
-      } finally {
-        fmOpts['types'] = originalTypes
       }
+      this.fetchMarketsWrapped = true
     }
 
+    const reload = this.marketLoadAttempted
+    this.marketLoadAttempted = true
     try {
-      await this.exchange.loadMarkets()
+      // CCXT retains a rejected marketsLoading promise. Recovery attempts must
+      // force a reload or they replay the original signed URL and timestamp
+      // forever without issuing another request.
+      await this.exchange.loadMarkets(reload)
     } catch (err) {
       throw BrokerError.from(err, 'NETWORK')
     }
