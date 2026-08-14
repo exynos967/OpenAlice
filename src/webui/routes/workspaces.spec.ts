@@ -13,6 +13,8 @@ import { HeadlessCapacityError, type WorkspaceService } from '../../workspaces/s
 import { TemplateUpgradeError } from '../../workspaces/template-upgrade.js';
 import { WorkspaceAbsorbError } from '../../workspaces/workspace-absorb.js';
 import { readWorkspaceMetadata } from '../../workspaces/workspace-metadata.js';
+import { emptyAgentSessionRuntime } from '../../workspaces/cli-adapter.js';
+import { readWorkspaceRuntimeSettings } from '../../workspaces/workspace-runtime-settings.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -41,6 +43,9 @@ function build(
     workspaceAbsorbs?: any;
     availability?: Record<string, { installed: boolean; path: string | null }>;
     spawnPlan?: any;
+    sessionRecord?: any;
+    runtimeBinding?: any;
+    poolLive?: any;
   } = {},
 ) {
   const claude = {
@@ -71,6 +76,12 @@ function build(
     checkedAt: null,
   };
   const getAgentRuntimeReadiness = vi.fn(() => runtimeReadiness);
+  const replaceRuntimeBinding = vi.fn(async (input: any) => ({
+    resumeId: input.resumeId,
+    wsId: input.wsId,
+    agent: input.agent,
+    runtimeBinding: input.runtimeBinding,
+  }));
   const probeAgentRuntimeReadiness = vi.fn(async () => ({
     ...runtimeReadiness,
     overallReady: true,
@@ -141,8 +152,22 @@ function build(
     runHeadlessTask,
     dispatchHeadlessTask,
     resumeRegistry: {
-      get: vi.fn(() => opts.resumeIdentity ?? null),
+      get: vi.fn(() => opts.resumeIdentity ?? (opts.sessionRecord ? {
+        resumeId: opts.sessionRecord.resumeId,
+        wsId: opts.sessionRecord.wsId,
+        agent: opts.sessionRecord.agent,
+        lifecycle: 'active',
+        runtimeBinding: opts.runtimeBinding ?? null,
+      } : null)),
       ensure: vi.fn(async (input: any) => ({ resumeId: input.resumeId ?? 'resume-1', ...input })),
+      replaceRuntimeBinding,
+    },
+    sessionRegistry: {
+      get: vi.fn(() => opts.sessionRecord),
+      update: vi.fn(async () => undefined),
+    },
+    pool: {
+      get: vi.fn(() => opts.poolLive),
     },
     getAgentRuntimeReadiness,
     probeAgentRuntimeReadiness,
@@ -169,6 +194,7 @@ function build(
     lifecycle,
     templateUpgrades,
     workspaceAbsorbs,
+    replaceRuntimeBinding,
   };
 }
 
@@ -329,6 +355,15 @@ async function patch(app: any, path: string, body?: unknown) {
   });
   const json = await res.json().catch(() => null);
   return { status: res.status, body: json as any };
+}
+
+async function put(app: any, path: string, body?: unknown) {
+  const res = await app.request(path, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return { status: res.status, body: await res.json().catch(() => null) as any };
 }
 
 async function del(app: any, path: string) {
@@ -571,6 +606,56 @@ describe('PATCH /:id/metadata', () => {
   });
 });
 
+describe('PUT /:id/runtime-settings', () => {
+  it('persists secret-free fixed defaults without replacing recent history', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'workspace-route-ai-preferences-'));
+    try {
+      const codex = {
+        id: 'codex',
+        capabilities: { headless: true },
+        composeHeadlessCommand: () => [],
+      };
+      const { app } = build({ meta: { id: 'ws-1', tag: 'stable-tag', dir }, adapters: { codex } });
+      const saved = await put(app, '/ws-1/runtime-settings', {
+        interactive: { defaultAgent: null, agents: {} },
+        headless: {
+          defaultAgent: 'codex',
+          agents: {
+            codex: { accessMode: 'native', model: 'gpt-5.6-terra', reasoningEffort: 'low' },
+          },
+        },
+      });
+      expect(saved.status).toBe(200);
+      expect(saved.body.settings.runtime.headless).toMatchObject({
+        defaultAgent: 'codex',
+        agents: { codex: { accessMode: 'native', model: 'gpt-5.6-terra', reasoningEffort: 'low' } },
+        recent: { agents: {} },
+      });
+      expect(await readWorkspaceRuntimeSettings(dir)).toMatchObject({
+        ok: true,
+        settings: { version: 3, runtime: { headless: { defaultAgent: 'codex' } } },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects non-headless runtimes for headless launches', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'workspace-route-ai-preferences-'));
+    try {
+      const pi = { id: 'pi', capabilities: { headless: false } };
+      const { app } = build({ meta: { id: 'ws-1', dir }, adapters: { pi } });
+      const result = await put(app, '/ws-1/runtime-settings', {
+        interactive: { defaultAgent: null, agents: {} },
+        headless: { defaultAgent: 'pi', agents: {} },
+      });
+      expect(result).toMatchObject({ status: 400, body: { error: 'invalid_agent' } });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('agent runtime readiness routes', () => {
   it('GET returns the cached snapshot without triggering a probe', async () => {
     const { app, getAgentRuntimeReadiness, probeAgentRuntimeReadiness } = build();
@@ -726,6 +811,7 @@ describe('POST /:id/headless/:taskId/session', () => {
       namePrefix: 'x',
       capabilities: { resumeById: true, resumeLast: true },
       lifecycle: { prepareWorkspace: vi.fn(async () => {}) },
+      sessionRuntime: emptyAgentSessionRuntime,
     };
     const task = opts.task ?? {
       taskId: 'run-1',
@@ -768,6 +854,7 @@ describe('POST /:id/headless/:taskId/session', () => {
         agent: task.agent ?? 'codex',
         agentSessionId: task.agentSessionId ?? '019eb75e-0b1b-7fa2',
         latestTaskId: task.taskId,
+        runtimeBinding: { version: 1, credential: { source: 'native' } },
       });
     }
     const svc = {
@@ -834,6 +921,7 @@ describe('POST /:id/headless/:taskId/session', () => {
     expect(opened.body.session).toMatchObject({
       sourceRunId: 'run-1',
       resumeId: 'resume-run-1',
+      runtime: { credentialSource: 'native' },
     });
   });
 
@@ -857,10 +945,102 @@ describe('POST /:id/headless/:taskId/session', () => {
   });
 });
 
+describe('PUT /:id/sessions/:sid/runtime', () => {
+  const TOKEN = 'claude-sunny-amber-spring';
+  const pausedRecord = {
+    id: TOKEN,
+    resumeId: 'resume-session-runtime',
+    wsId: 'ws-1',
+    agent: 'claude',
+    name: 'c1',
+    createdAt: '2026-08-11T00:00:00.000Z',
+    lastActiveAt: '2026-08-11T00:01:00.000Z',
+    state: 'paused',
+    surface: 'terminal',
+  };
+  const adapter = {
+    id: 'claude',
+    displayName: 'Claude Code',
+    capabilities: {
+      aiProvider: {
+        credentialSource: 'runtime-or-workspace',
+        wirePreference: ['anthropic'],
+      },
+    },
+    sessionRuntime: emptyAgentSessionRuntime,
+  };
+
+  it('replaces the persisted binding for a paused Session without resuming it', async () => {
+    const { app, replaceRuntimeBinding } = build({
+      sessionRecord: pausedRecord,
+      adapters: { claude: adapter },
+    });
+
+    const result = await put(app, `/ws-1/sessions/${TOKEN}/runtime`, {
+      credentialSource: 'native',
+      model: 'claude-sonnet-4-5',
+      reasoningEffort: 'low',
+    });
+
+    expect(result).toMatchObject({
+      status: 200,
+      body: {
+        session: {
+          id: TOKEN,
+          state: 'paused',
+          runtime: {
+            credentialSource: 'native',
+            model: 'claude-sonnet-4-5',
+            reasoningEffort: 'low',
+          },
+        },
+      },
+    });
+    expect(replaceRuntimeBinding).toHaveBeenCalledWith(expect.objectContaining({
+      resumeId: 'resume-session-runtime',
+      runtimeBinding: {
+        version: 1,
+        credential: { source: 'native' },
+        model: 'claude-sonnet-4-5',
+        reasoningEffort: 'low',
+      },
+    }));
+  });
+
+  it('rejects edits while the Session is running', async () => {
+    const { app, replaceRuntimeBinding } = build({
+      sessionRecord: { ...pausedRecord, state: 'running' },
+      adapters: { claude: adapter },
+      poolLive: { pid: 42 },
+    });
+
+    const result = await put(app, `/ws-1/sessions/${TOKEN}/runtime`, {
+      credentialSource: 'native',
+    });
+
+    expect(result).toMatchObject({ status: 409, body: { error: 'session_not_paused' } });
+    expect(replaceRuntimeBinding).not.toHaveBeenCalled();
+  });
+
+  it('requires a saved credential when vault management is selected', async () => {
+    const { app, replaceRuntimeBinding } = build({
+      sessionRecord: pausedRecord,
+      adapters: { claude: adapter },
+    });
+
+    const result = await put(app, `/ws-1/sessions/${TOKEN}/runtime`, {
+      credentialSource: 'vault',
+    });
+
+    expect(result).toMatchObject({ status: 400, body: { error: 'bad_request' } });
+    expect(replaceRuntimeBinding).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /:id/sessions/:sid/resume — concurrent coalescing (ANG-120)', () => {
   const TOKEN = 'claude-calm-amber-river';
 
-  function buildResume(workspaceId = 'ws-1', resolverOnly = false) {
+  function buildResume(workspaceId = 'ws-1', resolverOnly = false, adapterOverride?: any) {
     const session = {
       recordId: TOKEN,
       wsId: workspaceId,
@@ -874,19 +1054,29 @@ describe('POST /:id/sessions/:sid/resume — concurrent coalescing (ANG-120)', (
       live = session;
       return session;
     });
+    const adapter = adapterOverride ?? {
+      id: 'claude',
+      capabilities: { resumeById: true, resumeLast: false },
+      sessionRuntime: emptyAgentSessionRuntime,
+    };
     const record = {
       id: TOKEN,
       resumeId: 'resume-aid',
       wsId: workspaceId,
-      agent: 'claude',
+      agent: adapter.id,
       name: 'c1',
       state: 'paused',
       resumeHint: { kind: 'agent-session-id', value: 'aid' },
     };
-    const adapter = { id: 'claude', capabilities: { resumeById: true, resumeLast: false } };
     const svc = {
       sessionRegistry: { get: () => record, update: vi.fn(async () => {}) },
-      resumeRegistry: { get: () => ({ agentSessionId: 'aid' }) },
+      resumeRegistry: {
+        get: () => ({
+          agentSessionId: 'aid',
+          runtimeBinding: { version: 1, credential: { source: 'native' } },
+        }),
+        ensure: vi.fn(async (input: any) => input),
+      },
       pool: { get: () => live, spawn, disposeToken: vi.fn() },
       registry: { get: () => resolverOnly ? undefined : ({ id: workspaceId, dir: '/w' }) },
       resolveRuntimeWorkspace: resolverOnly
@@ -925,6 +1115,37 @@ describe('POST /:id/sessions/:sid/resume — concurrent coalescing (ANG-120)', (
 
     expect(result.body.ok).toBe(true);
     expect(spawn).toHaveBeenCalledOnce();
+  });
+
+  it('resumes a native-login runtime with an empty Workspace config without injecting a vault credential', async () => {
+    const opencode = {
+      id: 'opencode',
+      capabilities: {
+        resumeById: true,
+        resumeLast: false,
+        aiProvider: {
+          credentialSource: 'runtime-or-workspace',
+          wirePreference: ['openai-chat'],
+        },
+      },
+      readAiConfig: vi.fn(async () => null),
+      writeAiConfig: vi.fn(async () => {}),
+      sessionRuntime: emptyAgentSessionRuntime,
+    };
+    const { app, spawn } = buildResume('ws-1', false, opencode);
+
+    const result = await post(app, `/ws-1/sessions/${TOKEN}/resume`);
+
+    expect(result.status).toBe(200);
+    expect(result.body.ok).toBe(true);
+    expect(opencode.readAiConfig).not.toHaveBeenCalled();
+    expect(opencode.writeAiConfig).not.toHaveBeenCalled();
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(spawn).toHaveBeenCalledWith('ws-1', expect.objectContaining({
+      sessionRuntime: expect.objectContaining({
+        binding: { version: 1, credential: { source: 'native' } },
+      }),
+    }));
   });
 });
 
@@ -1106,6 +1327,7 @@ describe('Workspace manager surface routes', () => {
       namePrefix: 'p',
       capabilities: { resumeById: true },
       lifecycle: { prepareWorkspace: vi.fn(async () => undefined) },
+      sessionRuntime: emptyAgentSessionRuntime,
     };
     const snapshot = {
       recordId: 'pi-manager-test',
@@ -1210,6 +1432,7 @@ describe('Workspace manager surface routes', () => {
       namePrefix: 'x',
       capabilities: { resumeById: true },
       lifecycle: { prepareWorkspace: vi.fn(async () => undefined) },
+      sessionRuntime: emptyAgentSessionRuntime,
     };
     let spawnedContext: any = null;
     let liveSession: any = null;
@@ -1265,13 +1488,28 @@ describe('Workspace manager surface routes', () => {
     const result = await post(app, '/manager/quick-start', {
       prompt: 'Map ownership.',
       agent: 'codex',
+      model: 'gpt-5.6-terra',
+      reasoningEffort: 'high',
     });
     expect(result.status).toBe(201);
     expect(result.body).toMatchObject({
       session: { wsId: 'workspace-manager', agent: 'codex', surface: 'terminal' },
       snapshot: null,
     });
-    expect(spawnedContext).toMatchObject({ agentId: 'codex' });
+    expect(spawnedContext).toMatchObject({
+      agentId: 'codex',
+      sessionRuntime: {
+        binding: {
+          credential: { source: 'native' },
+          model: 'gpt-5.6-terra',
+          reasoningEffort: 'high',
+        },
+        ai: {
+          model: 'gpt-5.6-terra',
+          reasoningEffort: 'high',
+        },
+      },
+    });
     expect(result.body).toMatchObject({ session: { title: 'Map ownership.' } });
     expect(spawnedContext.initialPrompt).toContain('OpenAlice Workspace Manager');
     expect(spawnedContext.initialPrompt).toContain('User request:\nMap ownership.');

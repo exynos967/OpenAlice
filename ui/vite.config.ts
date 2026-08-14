@@ -63,6 +63,11 @@ const { port: uiPort, strictPort } = readUiPort()
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      '@': resolve(__dirname, 'src'),
+    },
+  },
   // Inject the backend port as a compile-time constant so the dev client can
   // open the PTY WebSocket *directly* against the backend, bypassing the Vite
   // dev proxy. node-http-proxy's WS upgrade forwarding chokes under the
@@ -78,6 +83,11 @@ export default defineConfig({
   // Backend port is read from `data/config/ports.json` (web.port) so
   // changing the backend port in one place propagates to Vite automatically.
   server: {
+    // Runtime discovery intentionally advertises an IPv4 loopback URL. Vite's
+    // default `localhost` binding may resolve to IPv6-only on macOS, leaving
+    // the installed CLI unable to open or diagnose an otherwise healthy dev
+    // Runtime through the advertised 127.0.0.1 endpoint.
+    host: '127.0.0.1',
     port: uiPort,
     strictPort,
     proxy: {

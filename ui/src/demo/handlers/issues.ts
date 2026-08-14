@@ -35,6 +35,7 @@ const MODEL_REASONING_EFFORTS = [
   'high',
   'xhigh',
   'max',
+  'ultra',
 ] as const satisfies readonly ModelReasoningEffort[]
 
 const COMMENT_MAX = 16_000
@@ -71,6 +72,8 @@ export const issuesHandlers = [
       priority?: unknown
       assignee?: unknown
       agent?: unknown
+      credential?: unknown
+      credentialSource?: unknown
       model?: unknown
       effort?: unknown
       what?: unknown
@@ -84,6 +87,8 @@ export const issuesHandlers = [
       priority?: IssuePriority
       assignee?: string
       agent?: string | null
+      credential?: string | null
+      credentialSource?: 'native' | null
       model?: string | null
       effort?: ModelReasoningEffort | null
       what?: string
@@ -119,6 +124,24 @@ export const issuesHandlers = [
         patch.agent = agent
       }
     }
+    if (body.credential !== undefined) {
+      if (body.credential === null || body.credential === '') {
+        patch.credential = null
+      } else if (typeof body.credential !== 'string' || !body.credential.trim()) {
+        return HttpResponse.json({ error: 'invalid_credential' }, { status: 400 })
+      } else {
+        patch.credential = body.credential.trim()
+      }
+    }
+    if (body.credentialSource !== undefined) {
+      if (body.credentialSource === null || body.credentialSource === '') {
+        patch.credentialSource = null
+      } else if (body.credentialSource !== 'native') {
+        return HttpResponse.json({ error: 'invalid_credential_source' }, { status: 400 })
+      } else {
+        patch.credentialSource = 'native'
+      }
+    }
     if (body.model !== undefined) {
       if (body.model === null || body.model === '') {
         patch.model = null
@@ -148,6 +171,8 @@ export const issuesHandlers = [
       patch.priority === undefined &&
       patch.assignee === undefined &&
       patch.agent === undefined
+      && patch.credential === undefined
+      && patch.credentialSource === undefined
       && patch.model === undefined
       && patch.effort === undefined
       && patch.what === undefined

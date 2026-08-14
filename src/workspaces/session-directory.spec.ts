@@ -15,6 +15,12 @@ describe('buildWorkspaceSessionDirectory', () => {
         createdAt: 1,
         updatedAt: 2,
         lifecycle: 'active',
+        runtimeBinding: {
+          version: 1,
+          credential: { source: 'vault', credentialSlug: 'secret-slug', wireShape: 'openai-responses' },
+          model: 'gpt-5.6-terra',
+          reasoningEffort: 'high',
+        },
       }],
       interactiveFor: () => ({
         id: 'launcher-secret',
@@ -44,6 +50,7 @@ describe('buildWorkspaceSessionDirectory', () => {
     expect(result.sessions[0]).toMatchObject({
       resumeId: 'resume-kind-owl-abc123',
       resumable: true,
+      runtime: { credentialSource: 'vault', credentialSlug: 'secret-slug', model: 'gpt-5.6-terra', reasoningEffort: 'high' },
       interactive: { name: 'c1', title: 'Investigate provenance' },
       latestExecution: { taskId: 'task-1', assistantPreview: 'done' },
     })

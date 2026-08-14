@@ -10,11 +10,17 @@ import { dirname } from 'node:path'
 
 import type { Logger } from './logger.js'
 import { generateResumeId } from './resume-id.js'
+import type { SessionRuntimeBinding } from './cli-adapter.js'
+import type { SessionRuntimeBindingStore } from './session-runtime-store.js'
 
 export interface ResumeIdentityRecord {
   readonly resumeId: string
   readonly wsId: string
   readonly agent: string
+  /** Runtime-only hydration of the Workspace-owned AI config. Launch paths
+   * keep it immutable; a paused Session may replace it through the explicit
+   * edit boundary. */
+  runtimeBinding?: SessionRuntimeBinding
   agentSessionId?: string
   latestTaskId?: string
   readonly createdAt: number
@@ -33,10 +39,15 @@ export class ResumeRegistry {
   private constructor(
     private readonly path: string,
     private readonly logger: Logger,
+    private readonly runtimeBindings: SessionRuntimeBindingStore,
   ) {}
 
-  static async load(path: string, logger: Logger): Promise<ResumeRegistry> {
-    const registry = new ResumeRegistry(path, logger)
+  static async load(
+    path: string,
+    logger: Logger,
+    runtimeBindings: SessionRuntimeBindingStore,
+  ): Promise<ResumeRegistry> {
+    const registry = new ResumeRegistry(path, logger, runtimeBindings)
     await registry.read()
     return registry
   }
@@ -57,6 +68,11 @@ export class ResumeRegistry {
           typeof record['createdAt'] !== 'number' ||
           typeof record['updatedAt'] !== 'number'
         ) throw new Error('resume-identities.json contains an invalid record')
+        const runtimeBinding = await this.runtimeBindings.read({
+          wsId: record['wsId'],
+          resumeId: record['resumeId'],
+          agent: record['agent'],
+        })
         this.records.set(record['resumeId'], {
           resumeId: record['resumeId'],
           wsId: record['wsId'],
@@ -70,6 +86,7 @@ export class ResumeRegistry {
           ...(typeof record['latestTaskId'] === 'string'
             ? { latestTaskId: record['latestTaskId'] }
             : {}),
+          ...(runtimeBinding ? { runtimeBinding } : {}),
           ...(typeof record['retiredAt'] === 'number'
             ? { retiredAt: record['retiredAt'] }
             : {}),
@@ -112,6 +129,7 @@ export class ResumeRegistry {
     agent: string
     agentSessionId?: string
     latestTaskId?: string
+    runtimeBinding?: SessionRuntimeBinding
     now?: number
   }): Promise<ResumeIdentityRecord> {
     const resumeId = input.resumeId ?? generateResumeId({
@@ -125,11 +143,35 @@ export class ResumeRegistry {
       if (existing.lifecycle === 'retired') {
         throw new Error(`resume identity ${resumeId} is retired`)
       }
+      if (
+        input.runtimeBinding
+        && existing.runtimeBinding
+        && JSON.stringify(input.runtimeBinding) !== JSON.stringify(existing.runtimeBinding)
+      ) {
+        throw new Error(`resume identity ${resumeId} already owns a different runtime binding`)
+      }
+      if (input.runtimeBinding && !existing.runtimeBinding) {
+        await this.runtimeBindings.ensure({
+          wsId: input.wsId,
+          resumeId,
+          agent: input.agent,
+          binding: input.runtimeBinding,
+        })
+        existing.runtimeBinding = input.runtimeBinding
+      }
       if (input.agentSessionId) existing.agentSessionId = input.agentSessionId
       if (input.latestTaskId) existing.latestTaskId = input.latestTaskId
       existing.updatedAt = input.now ?? Date.now()
       await this.flush()
       return existing
+    }
+    if (input.runtimeBinding) {
+      await this.runtimeBindings.ensure({
+        wsId: input.wsId,
+        resumeId,
+        agent: input.agent,
+        binding: input.runtimeBinding,
+      })
     }
     const now = input.now ?? Date.now()
     const record: ResumeIdentityRecord = {
@@ -141,6 +183,7 @@ export class ResumeRegistry {
       lifecycle: 'active',
       ...(input.agentSessionId ? { agentSessionId: input.agentSessionId } : {}),
       ...(input.latestTaskId ? { latestTaskId: input.latestTaskId } : {}),
+      ...(input.runtimeBinding ? { runtimeBinding: input.runtimeBinding } : {}),
     }
     this.records.set(resumeId, record)
     await this.flush()
@@ -153,6 +196,33 @@ export class ResumeRegistry {
     record.agentSessionId = agentSessionId
     record.updatedAt = Date.now()
     await this.flush()
+  }
+
+  async replaceRuntimeBinding(input: {
+    resumeId: string
+    wsId: string
+    agent: string
+    runtimeBinding: SessionRuntimeBinding
+    now?: number
+  }): Promise<ResumeIdentityRecord> {
+    const record = this.records.get(input.resumeId)
+    if (!record) throw new Error(`resume identity ${input.resumeId} was not found`)
+    if (record.wsId !== input.wsId || record.agent !== input.agent) {
+      throw new Error(`resume identity ${input.resumeId} belongs to ${record.wsId}/${record.agent}`)
+    }
+    if (record.lifecycle === 'retired') {
+      throw new Error(`resume identity ${input.resumeId} is retired`)
+    }
+    await this.runtimeBindings.replace({
+      wsId: input.wsId,
+      resumeId: input.resumeId,
+      agent: input.agent,
+      binding: input.runtimeBinding,
+    })
+    record.runtimeBinding = input.runtimeBinding
+    record.updatedAt = input.now ?? Date.now()
+    await this.flush()
+    return record
   }
 
   async retireWorkspace(
@@ -201,7 +271,8 @@ export class ResumeRegistry {
     try {
       await mkdir(dirname(this.path), { recursive: true })
       const tmp = `${this.path}.tmp`
-      await writeFile(tmp, JSON.stringify({ version: 1, records: [...this.records.values()] }, null, 2), 'utf8')
+      const records = [...this.records.values()].map(({ runtimeBinding: _runtimeBinding, ...record }) => record)
+      await writeFile(tmp, JSON.stringify({ version: 1, records }, null, 2), 'utf8')
       await rename(tmp, this.path)
     } catch (err) {
       this.logger.warn('resume_registry.flush_failed', { err })
