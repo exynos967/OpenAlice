@@ -117,7 +117,7 @@ remove the stale lock while the stack is down:
 ```bash
 docker compose down
 docker compose run --rm --no-deps --entrypoint sh openalice \
-  -c "rm -rf /data/workspaces/state/runtime.lock"
+  -c "rm -rf /data/state/runtime.lock /data/workspaces/state/runtime.lock"
 docker compose up -d
 ```
 
