@@ -1129,7 +1129,7 @@ describe('CcxtBroker — getAccount', () => {
     const info = await acc.getAccount()
 
     expect(fetchDualAccount).toHaveBeenCalledWith({})
-    expect(fetchDualPositions).toHaveBeenCalledWith({ page: 1, size: 100 })
+    expect(fetchDualPositions).toHaveBeenCalledWith({ pageIndex: 1, pageSize: 100 })
     expect(info.netLiquidation).toBe('350')
     expect(info.totalCashValue).toBe('100')
     expect(info.investments).toEqual([

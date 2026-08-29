@@ -97,15 +97,18 @@ async function fetchPagedRows(
   implicit: ((params?: Record<string, unknown>) => Promise<unknown>) | undefined,
   path: string,
   product: string,
+  // Binance paginates with current/size + rows on Simple Earn but
+  // pageIndex/pageSize + list on Dual Investment — part of the wire contract.
+  paging: { page: string; size: string; field: 'rows' | 'list' } = { page: 'current', size: 'size', field: 'rows' },
 ): Promise<Record<string, unknown>[]> {
   const result: Record<string, unknown>[] = []
   try {
     for (let current = 1; current <= MAX_PAGES; current += 1) {
-      const params = { current, size: PAGE_SIZE }
+      const params = { [paging.page]: current, [paging.size]: PAGE_SIZE }
       const response = implicit
         ? await implicit.call(exchange, params)
         : await exchange.request(path, 'sapi', 'GET', params)
-      const page = rows(response)
+      const page = paging.field === 'list' ? list(response) : rows(response)
       result.push(...page)
 
       const rawTotal = record(response)?.['total']
@@ -206,46 +209,36 @@ const ACTIVE_DUAL_INVESTMENT_STATUSES = new Set([
 ])
 
 async function fetchDualInvestmentHoldings(exchange: BinanceExchange): Promise<InvestmentHolding[]> {
+  const positions = await fetchPagedRows(
+    exchange,
+    exchange.sapiGetDciProductPositions,
+    'dci/product/positions',
+    'Dual Investment',
+    { page: 'pageIndex', size: 'pageSize', field: 'list' },
+  )
+
   const result: InvestmentHolding[] = []
-  try {
-    for (let page = 1; page <= MAX_PAGES; page += 1) {
-      const params = { page, size: PAGE_SIZE }
-      const response = exchange.sapiGetDciProductPositions
-        ? await exchange.sapiGetDciProductPositions(params)
-        : await exchange.request('dci/product/positions', 'sapi', 'GET', params)
-      const positions = list(response)
+  for (const position of positions) {
+    const status = typeof position['purchaseStatus'] === 'string'
+      ? position['purchaseStatus'].trim().toUpperCase()
+      : ''
+    if (!ACTIVE_DUAL_INVESTMENT_STATUSES.has(status)) continue
 
-      for (const position of positions) {
-        const status = typeof position['purchaseStatus'] === 'string'
-          ? position['purchaseStatus'].trim().toUpperCase()
-          : ''
-        if (!ACTIVE_DUAL_INVESTMENT_STATUSES.has(status)) continue
-
-        const asset = typeof position['investCoin'] === 'string'
-          ? position['investCoin'].trim().toUpperCase()
-          : ''
-        if (!asset) continue
-        const amount = optionalAmount(position, 'subscriptionAmount', 'Dual Investment holding')
-        if (amount.lte(0)) continue
-        const annualPercentageRate = optionalRate(position['apr'])
-        result.push({
-          product: 'dual-investment',
-          asset,
-          amount: amount.toString(),
-          ...(annualPercentageRate === undefined ? {} : { annualPercentageRate }),
-        })
-      }
-
-      const rawTotal = record(response)?.['total']
-      const total = rawTotal === undefined ? Number.NaN : Number(rawTotal)
-      if (positions.length < PAGE_SIZE || (Number.isFinite(total) && page * PAGE_SIZE >= total)) return result
-    }
-    console.warn(`CcxtBroker[binance]: Dual Investment positions truncated after ${MAX_PAGES * PAGE_SIZE} rows`)
-    return result
-  } catch (err) {
-    warnUnavailable('Dual Investment positions', err)
-    return result
+    const asset = typeof position['investCoin'] === 'string'
+      ? position['investCoin'].trim().toUpperCase()
+      : ''
+    if (!asset) continue
+    const amount = optionalAmount(position, 'subscriptionAmount', 'Dual Investment holding')
+    if (amount.lte(0)) continue
+    const annualPercentageRate = optionalRate(position['apr'])
+    result.push({
+      product: 'dual-investment',
+      asset,
+      amount: amount.toString(),
+      ...(annualPercentageRate === undefined ? {} : { annualPercentageRate }),
+    })
   }
+  return result
 }
 
 async function fetchDualInvestment(exchange: BinanceExchange): Promise<{
