@@ -36,7 +36,9 @@ Research:
 
 Predecessor:
 
-- [[plans/cli-lifecycle-quality.md]]
+- CLI lifecycle quality shipped in PR #847. The durable contract is
+  [[docs/cli-installer.md]]. The execution plan is git history
+  `git show <deletion-commit>^:plans/cli-lifecycle-quality.md`.
 
 ## Objective
 
@@ -111,7 +113,9 @@ openalice status [--instance <name>] [--json]
 openalice open [--instance <name>]
 openalice logs [--instance <name>] [--component <name>] [--follow] [--json]
 openalice doctor [--instance <name>] [--json] [--fix]
-openalice instance list [--json]
+openalice project list [--json]
+openalice project use <key>
+openalice project copy-ai-creds [--from <key>] [--to <key>] [--yes]
 openalice instance delete <name>
 openalice update [--check] [--yes]
 openalice uninstall [--plan] [--yes]
@@ -138,6 +142,14 @@ openalice completion <bash|zsh|fish|powershell>
   containers, service managers, and diagnosis.
 
 ### TUI information architecture
+
+The local-only root described below was superseded on 2026-08-23 by the
+Machine → AliceProject Fleet increment in
+[[plans/remote-project-fleet.md]]. Fleet is now the default root; the original
+local lifecycle projection remains the Overview page and remains available for
+the selected local AliceProject. This plan continues to own that lifecycle,
+logs, Doctor, update, Setup, and terminal-restoration behavior, while the Fleet
+plan owns remote inventory, tunnels, and transfer.
 
 The minimum 80 by 24 root screen contains:
 
@@ -454,8 +466,8 @@ running Guardian, and TUI stop returned the home to absent.
 
 - [x] Inventory server/UI/Guardian outputs, production dependencies, native
   modules, Broker Pack boundary, and managed Pi injection.
-- [ ] Produce deterministic platform/architecture archives.
-- [ ] Define authenticated manifest, version, compatibility, Node requirement,
+- [x] Produce deterministic platform/architecture archives.
+- [x] Define authenticated manifest, version, compatibility, Node requirement,
   file hashes, and content identity.
 - [x] Install immutable Runtime versions and validate without a checkout.
 - [x] Add providers for bundle, source-development, Docker, Electron, and
@@ -639,6 +651,12 @@ This plan is complete only when:
 
 ## Progress Log
 
+- 2026-08-23: The Machine Fleet increment superseded the local-only root with
+  a wide two-pane/narrow drill-down Machine → AliceProject view while retaining
+  Overview and all local lifecycle actions. Remote inventory is bounded and
+  non-interactive; compatible running remote Projects open through TUI-owned
+  SSH loopback tunnels that are aborted on detach without stopping Runtime.
+
 - 2026-07-29: Audited CLI lifecycle, Guardian control, source-backed Runtime,
   installer smoke, Herdr reference, and cross-surface gates. Drafted the first
   canonical plan in parallel PR #852.
@@ -805,3 +823,16 @@ This plan is complete only when:
   component health, while deliberately omitting `runtime.stop`. The real dev
   smoke proves CLI discovery, rejected stop, duplicate-writer refusal, and
   survival of the original owner in one isolated journey.
+- 2026-08-13: Plan-index audit against current `dev`. Increment 7's
+  platform/arch archives and hashed `runtime-manifest.json` already ship
+  through `pnpm build:headless-runtime` and the release matrix
+  (darwin/linux × arm64/x64), including an outside-checkout install/boot/
+  Doctor/`down` gate. Remaining increment 7 proof is still clean-host
+  Workspace PTY, optional components, and Pi. Increment 3 is still a hybrid
+  TypeScript/`mjs` CLI without `@xterm/headless`. Increment 4 still lacks a
+  dedicated component panel. Increment 5 still lacks log
+  filter/follow/pause, copyable Doctor remediation, update plan/progress
+  screens, and active-work disclosure. Increment 6 still lacks
+  `openalice config check`, last-known-good live reload, and registry-only
+  deletion. Increments 9–10 (atomic update/rollback and N-1 release gates)
+  remain unstarted. The plan stays Active.

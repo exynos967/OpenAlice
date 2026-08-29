@@ -33,74 +33,35 @@ import {
   WIRE_SHAPE_GUIDANCE,
   agentWireShapes,
   compatibleAgentIds,
+  credentialMatchesQuery,
   describeModelSemantics,
   isApiKeyPreset,
   presetDefaultModel,
   presetModel,
+  vendorLabel,
   vendorPreset,
 } from '../lib/presetHelpers'
 import { notifyWorkspaceDefaultsChanged } from '../lib/workspaceAiEvents'
-import { listAgents, type AgentInfo } from '../components/workspace/api'
+import type { AgentInfo } from '../components/workspace/api'
+import { useAgentRuntimes } from '../hooks/useAgentRuntimes'
+import { useWorkspace } from '../tabs/store'
 
 function credentialLabel(cred: Pick<CredentialSummary, 'slug' | 'vendor' | 'label'>): string {
   return cred.label?.trim() || cred.slug
 }
 
-// ==================== Agent runtimes ====================
-//
-// The four CLI runtimes a workspace can launch. These credentials feed them;
-// this panel orients the user on what each is and how it authenticates. Editorial
-// copy grounded in the adapters (src/workspaces/adapters/*) — keep it factual.
-
-interface RuntimeInfo {
-  id: string
-  name: string
-  blurbKey: 'aiProvider.runtime.claude.blurb' | 'aiProvider.runtime.codex.blurb' | 'aiProvider.runtime.opencode.blurb' | 'aiProvider.runtime.pi.blurb'
-  modelsKey: 'aiProvider.runtime.claude.models' | 'aiProvider.runtime.codex.models' | 'aiProvider.runtime.opencode.models' | 'aiProvider.runtime.pi.models'
-  authKey: 'aiProvider.runtime.claude.auth' | 'aiProvider.runtime.codex.auth' | 'aiProvider.runtime.opencode.auth' | 'aiProvider.runtime.pi.auth'
-}
-
-const AGENT_RUNTIMES: RuntimeInfo[] = [
-  {
-    id: 'claude',
-    name: 'Claude Code',
-    blurbKey: 'aiProvider.runtime.claude.blurb',
-    modelsKey: 'aiProvider.runtime.claude.models',
-    authKey: 'aiProvider.runtime.claude.auth',
-  },
-  {
-    id: 'codex',
-    name: 'Codex',
-    blurbKey: 'aiProvider.runtime.codex.blurb',
-    modelsKey: 'aiProvider.runtime.codex.models',
-    authKey: 'aiProvider.runtime.codex.auth',
-  },
-  {
-    id: 'opencode',
-    name: 'opencode',
-    blurbKey: 'aiProvider.runtime.opencode.blurb',
-    modelsKey: 'aiProvider.runtime.opencode.models',
-    authKey: 'aiProvider.runtime.opencode.auth',
-  },
-  {
-    id: 'pi',
-    name: 'Pi',
-    blurbKey: 'aiProvider.runtime.pi.blurb',
-    modelsKey: 'aiProvider.runtime.pi.models',
-    authKey: 'aiProvider.runtime.pi.auth',
-  },
-]
-
 // ==================== Page ====================
 
 export function AIProviderPage() {
   const { t } = useTranslation()
-  const [agents, setAgents] = useState<AgentInfo[]>([])
+  const openOrFocus = useWorkspace((state) => state.openOrFocus)
+  const { agents } = useAgentRuntimes()
   const [credentials, setCredentials] = useState<CredentialSummary[] | null>(null)
   const [credentialsLoadError, setCredentialsLoadError] = useState(false)
   const [presets, setPresets] = useState<Preset[]>([])
   const [modal, setModal] = useState<{ mode: 'add' } | { mode: 'edit'; cred: CredentialSummary } | null>(null)
   const [pendingDelete, setPendingDelete] = useState<CredentialSummary | null>(null)
+  const [vaultQuery, setVaultQuery] = useState('')
 
   const reload = useCallback(async () => {
     setCredentials(null)
@@ -116,10 +77,13 @@ export function AIProviderPage() {
   useEffect(() => {
     void reload()
     api.config.getPresets().then(({ presets: p }) => setPresets(p)).catch(() => {})
-    void listAgents().then(setAgents).catch(() => setAgents([]))
   }, [reload])
 
   const apiKeyPresets = useMemo(() => presets.filter(isApiKeyPreset), [presets])
+  const visibleCredentials = useMemo(
+    () => (credentials ?? []).filter((cred) => credentialMatchesQuery(cred, vaultQuery)),
+    [credentials, vaultQuery],
+  )
 
   const handleDelete = async (slug: string): Promise<boolean> => {
     try {
@@ -169,7 +133,19 @@ export function AIProviderPage() {
             </div>
 
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-[13px] font-semibold text-foreground uppercase tracking-wide">{t('aiProvider.credentials')}</h2>
+              <div className="flex min-w-0 items-baseline gap-1.5">
+                <h2 className="text-[13px] font-semibold text-foreground uppercase tracking-wide">{t('aiProvider.credentials')}</h2>
+                {credentials.length > 0 && (
+                  <span className="text-[11px] text-muted-foreground">
+                    {vaultQuery.trim()
+                      ? t('aiProvider.credentialsFiltered', {
+                          shown: visibleCredentials.length,
+                          total: credentials.length,
+                        })
+                      : t('aiProvider.credentialsCount', { count: credentials.length })}
+                  </span>
+                )}
+              </div>
               <button
                 onClick={() => setModal({ mode: 'add' })}
                 className="text-[11px] px-2 py-1 rounded-md border border-border text-muted-foreground hover:text-primary hover:border-primary transition-colors"
@@ -178,18 +154,28 @@ export function AIProviderPage() {
               </button>
             </div>
 
+            {credentials.length > 0 && (
+              <input
+                className={`${inputClass} mb-3`}
+                value={vaultQuery}
+                onChange={(event) => setVaultQuery(event.target.value)}
+                placeholder={t('aiProvider.searchCredentials')}
+                aria-label={t('aiProvider.searchCredentials')}
+              />
+            )}
+
             <div className="space-y-2.5">
-              {credentials.map((cred) => {
+              {visibleCredentials.map((cred) => {
                 const compatibleAgents = compatibleAgentIds(cred.wires, agents)
                 return (
                   <div key={cred.slug} className="flex min-w-0 flex-col gap-3 rounded-lg border border-border bg-background px-4 py-3 sm:flex-row sm:items-center">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-[13px] font-medium text-foreground">{credentialLabel(cred)}</span>
+                        <span className="text-[11px] text-muted-foreground">{vendorLabel(cred.vendor)}</span>
                         {cred.label && (
-                          <span className="text-[11px] text-muted-foreground">{cred.vendor}</span>
+                          <span className="text-[11px] text-muted-foreground font-mono">{cred.slug}</span>
                         )}
-                        <span className="text-[11px] text-muted-foreground font-mono">{cred.slug}</span>
                         {compatibleAgents.map((agentId) => (
                           <span key={agentId} className="text-[10px] text-muted-foreground border border-border rounded px-1">{AGENT_LABELS[agentId] ?? agentId}</span>
                         ))}
@@ -235,6 +221,12 @@ export function AIProviderPage() {
                 )
               })}
 
+              {credentials.length > 0 && visibleCredentials.length === 0 && (
+                <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-[12px] text-muted-foreground">
+                  {t('aiProvider.noCredentialMatches', { query: vaultQuery })}
+                </p>
+              )}
+
               {credentials.length === 0 && (
                 <button
                   onClick={() => setModal({ mode: 'add' })}
@@ -250,43 +242,18 @@ export function AIProviderPage() {
           <WorkspaceDefaultsSection credentials={credentials} presets={presets} agents={agents} />
         </div>
 
-        {/* Runtime descriptions are reference material, not a prerequisite for
-            choosing the creation defaults above. Keep them available without
-            pushing the primary settings below several screens of prose. */}
-        <details className="group max-w-[1100px] min-w-0 mx-auto mt-6 rounded-lg border border-border bg-background">
-          <summary className="cursor-pointer list-none px-4 py-3 text-[13px] font-semibold text-foreground">
-            <span className="mr-2 inline-block text-muted-foreground transition-transform group-open:rotate-90">▸</span>
-            {t('aiProvider.runtimeReference')}
-          </summary>
-          <div className="border-t border-border p-4">
-            <div className="rounded-lg border border-border/50 bg-secondary/50 px-4 py-3 mb-4">
-              <p className="text-[13px] text-muted-foreground leading-relaxed">
-                {t('aiProvider.runtimeIntro')}
-              </p>
-            </div>
-            <div className="grid gap-2.5 lg:grid-cols-2">
-              {AGENT_RUNTIMES.map((rt) => (
-                <div key={rt.id} className="rounded-lg border border-border bg-background px-4 py-3">
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-[13px] font-medium text-foreground">{rt.name}</span>
-                    <span className="text-[11px] text-muted-foreground font-mono">{rt.id}</span>
-                  </div>
-                  <p className="text-[12px] text-muted-foreground mt-0.5 leading-snug">{t(rt.blurbKey)}</p>
-                  <dl className="mt-2 space-y-1">
-                    <div className="flex gap-2 text-[11px] leading-snug">
-                      <dt className="text-muted-foreground/70 shrink-0 w-[58px]">{t('aiProvider.models')}</dt>
-                      <dd className="text-muted-foreground">{t(rt.modelsKey)}</dd>
-                    </div>
-                    <div className="flex gap-2 text-[11px] leading-snug">
-                      <dt className="text-muted-foreground/70 shrink-0 w-[58px]">{t('aiProvider.auth')}</dt>
-                      <dd className="text-muted-foreground">{t(rt.authKey)}</dd>
-                    </div>
-                  </dl>
-                </div>
-              ))}
-            </div>
-          </div>
-        </details>
+        <div className="mx-auto mt-6 max-w-[1100px] rounded-lg border border-border/70 bg-background px-4 py-3">
+          <p className="text-[13px] leading-relaxed text-muted-foreground">
+            {t('aiProvider.openAgentRuntimesDescription')}
+          </p>
+          <button
+            type="button"
+            onClick={() => openOrFocus({ kind: 'settings', params: { category: 'agent-runtimes' } })}
+            className="oa-pressable mt-2 text-[12px] font-medium text-primary hover:underline"
+          >
+            {t('aiProvider.openAgentRuntimes')}
+          </button>
+        </div>
       </SettingsScrollArea>
 
       {modal && (

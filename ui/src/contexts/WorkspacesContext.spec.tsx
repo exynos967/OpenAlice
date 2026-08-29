@@ -9,6 +9,7 @@ import {
   type SessionRecord,
   type Workspace,
 } from '../components/workspace/api'
+import { resetAgentRuntimesStore } from '../hooks/useAgentRuntimes'
 import { i18n } from '../i18n'
 import { ToastProvider } from '../components/Toast'
 import { useWorkspaces } from './workspaces-context'
@@ -88,7 +89,7 @@ function workspace(): Workspace {
   }
 }
 
-function materializedSession(): SessionRecord {
+function persistentSession(): SessionRecord {
   return {
     id: 'pi-headless-follow-up',
     resumeId: 'resume-headless',
@@ -186,13 +187,14 @@ function QuickChatProbe() {
 
 beforeEach(async () => {
   vi.clearAllMocks()
+  resetAgentRuntimesStore()
   await i18n.changeLanguage('en')
   mocks.listWorkspaces.mockResolvedValue([workspace()])
   mocks.listTemplates.mockResolvedValue([])
   mocks.listAgents.mockResolvedValue([])
   mocks.getWorkspaceDefaultAgent.mockResolvedValue(null)
   mocks.getIssueDefaultAgent.mockResolvedValue(null)
-  mocks.openResumeSession.mockResolvedValue({ session: materializedSession() })
+  mocks.openResumeSession.mockResolvedValue({ session: persistentSession() })
   mocks.getWorkspaceManager.mockResolvedValue(managerSnapshot())
   mocks.pauseSession.mockResolvedValue(true)
   mocks.resumeSession.mockResolvedValue(null)
@@ -249,7 +251,7 @@ describe('WorkspacesProvider conversation routing', () => {
     })
   })
 
-  it('opens a materialized headless Session on the Ask Alice surface', async () => {
+  it('opens a persistent headless-first Session on the Ask Alice surface', async () => {
     render(
       <ToastProvider>
         <WorkspacesProvider>
@@ -311,7 +313,7 @@ describe('WorkspacesProvider conversation routing', () => {
   })
 
   it('lands a deleted focused Session on its Workspace Session library', async () => {
-    const focusedSession = materializedSession()
+    const focusedSession = persistentSession()
     mocks.listWorkspaces.mockResolvedValue([{ ...workspace(), sessions: [focusedSession] }])
     mocks.getWorkspaceState.mockReturnValue({
       tabs: {

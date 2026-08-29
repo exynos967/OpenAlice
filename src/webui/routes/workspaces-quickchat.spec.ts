@@ -53,6 +53,7 @@ function build(opts: {
   sessionsByWorkspace?: Record<string, any[]>;
   recentChatWorkspaceId?: string | null;
   autoQuantDefaultWorkspaceId?: string | null;
+  autoPredictionDefaultWorkspaceId?: string | null;
   claudeConfig?: WorkspaceAiCred | null;
   claudeInteractiveSetupStatus?: 'ready' | 'runtime-onboarding-required' | 'workspace-trust-required' | 'unknown';
   opencodeConfig?: WorkspaceAiCred | null;
@@ -102,13 +103,29 @@ function build(opts: {
     list: () => opts.workspaces ?? [],
     get: (id: string) => (opts.workspaces ?? []).find((w) => w.id === id) ?? (id === META.id ? META : undefined),
   };
+  const sessionRecords = new Map<string, any>(
+    Object.entries(opts.sessionsByWorkspace ?? {}).flatMap(([wsId, rows]) =>
+      rows.map((row) => [`${wsId}:${row.id}`, row] as const)),
+  );
+  const sessionsFor = (wsId: string) => [...sessionRecords.entries()]
+    .filter(([key]) => key.startsWith(`${wsId}:`))
+    .map(([, row]) => row);
   const sessionRegistry = {
     ensureLoaded: vi.fn(async () => {}),
-    listFor: vi.fn((wsId: string) => opts.sessionsByWorkspace?.[wsId] ?? []),
-    findById: vi.fn(() => undefined),
+    listFor: vi.fn(sessionsFor),
+    findById: vi.fn((id: string) => [...sessionRecords.values()].find((row) => row.id === id)),
+    findByResumeId: vi.fn((wsId: string, resumeId: string) =>
+      sessionsFor(wsId).find((row) => row.resumeId === resumeId)),
+    get: vi.fn((wsId: string, id: string) => sessionRecords.get(`${wsId}:${id}`)),
     nextName: () => 'o1',
-    create: vi.fn(async () => {}),
-    remove: vi.fn(async () => {}),
+    create: vi.fn(async (record: any) => { sessionRecords.set(`${record.wsId}:${record.id}`, record); }),
+    update: vi.fn(async (wsId: string, id: string, patch: any) => {
+      const record = sessionRecords.get(`${wsId}:${id}`);
+      if (!record) return undefined;
+      Object.assign(record, patch);
+      return record;
+    }),
+    remove: vi.fn(async (wsId: string, id: string) => sessionRecords.delete(`${wsId}:${id}`)),
   };
   const resumeRecords = new Map<string, any>();
   const resumeRegistry = {
@@ -117,6 +134,41 @@ function build(opts: {
       const resumeId = input.resumeId ?? `resume-${resumeRecords.size + 1}`;
       const record = { resumeId, ...input };
       resumeRecords.set(resumeId, record);
+      return record;
+    }),
+  };
+  const sessionCoordinator = {
+    ensure: vi.fn(async (input: any) => {
+      const identity = await resumeRegistry.ensure(input);
+      const existing = sessionRegistry.findByResumeId(input.wsId, identity.resumeId);
+      if (existing) {
+        Object.assign(existing, {
+          state: input.state ?? existing.state,
+          surface: input.surface ?? existing.surface,
+        });
+        return { identity, session: existing, created: false };
+      }
+      const now = '2026-07-12T00:00:00.000Z';
+      const record = {
+        id: `${input.agent}-test-${resumeRecords.size}`,
+        resumeId: identity.resumeId,
+        wsId: input.wsId,
+        agent: input.agent,
+        name: sessionRegistry.nextName(),
+        createdAt: now,
+        lastActiveAt: now,
+        state: input.state ?? 'paused',
+        surface: input.surface ?? 'headless',
+        ...(input.fallbackTitle ? { fallbackTitle: input.fallbackTitle } : {}),
+        ...(input.sourceRunId ? { sourceRunId: input.sourceRunId } : {}),
+      };
+      await sessionRegistry.create(record);
+      return { identity, session: record, created: true };
+    }),
+    transition: vi.fn(async (input: any) => {
+      const record = sessionRegistry.findByResumeId(input.wsId, input.resumeId);
+      if (!record) throw new Error('missing test SessionRecord');
+      Object.assign(record, { state: input.state, surface: input.surface });
       return record;
     }),
   };
@@ -130,6 +182,11 @@ function build(opts: {
     'auto-quant-v2',
     'auto-quant',
   );
+  const autoPredictionWorkspaceResolver = new TemplateWorkspaceResolver(
+    { registry: registry as any, sessionRegistry: sessionRegistry as any, creator },
+    'auto-prediction',
+    'prediction',
+  );
   const svc = {
     // Default []: today's tag never matches → creator.create path. Tests that
     // exercise targetWsId pass the workspace in so registry resolves it by id.
@@ -142,6 +199,8 @@ function build(opts: {
       chatWorkspaceResolver.resolveOrCreate(preferredWorkspaceId),
     resolveOrCreateAutoQuantWorkspace: (preferredWorkspaceId?: string | null, sourceVersion?: string) =>
       autoQuantWorkspaceResolver.resolveOrCreate(preferredWorkspaceId, sourceVersion),
+    resolveOrCreateAutoPredictionWorkspace: (preferredWorkspaceId?: string | null, sourceVersion?: string) =>
+      autoPredictionWorkspaceResolver.resolveOrCreate(preferredWorkspaceId, sourceVersion),
     resolveAdapter: (_m: any, agentId?: string) => adapters[agentId ?? 'claude'] ?? claude,
     adapters: {
       get: (id: string) => adapters[id],
@@ -149,6 +208,7 @@ function build(opts: {
     },
     sessionRegistry,
     resumeRegistry,
+    sessionCoordinator,
     pool: { spawn, get: vi.fn(() => undefined), setTerminalViewAttributes },
     publicMeta: vi.fn(async (workspace: any) => workspace),
     config: { launcherRepoRoot: '/repo' },
@@ -179,6 +239,9 @@ function build(opts: {
   const rememberAutoQuantDefaultWorkspace = vi.fn(async (workspaceId: string | null) => ({
     defaultWorkspaceId: workspaceId,
   }));
+  const rememberAutoPredictionDefaultWorkspace = vi.fn(async (workspaceId: string | null) => ({
+    defaultWorkspaceId: workspaceId,
+  }));
   const app = createWorkspaceRoutes(svc, {
     readQuickChatPreferences: vi.fn(async () => ({
       lastCredentialByAgent: {},
@@ -189,6 +252,10 @@ function build(opts: {
       defaultWorkspaceId: opts.autoQuantDefaultWorkspaceId ?? null,
     })),
     rememberAutoQuantDefaultWorkspace,
+    readAutoPredictionPreferences: vi.fn(async () => ({
+      defaultWorkspaceId: opts.autoPredictionDefaultWorkspaceId ?? null,
+    })),
+    rememberAutoPredictionDefaultWorkspace,
   });
   return {
     app,
@@ -198,6 +265,7 @@ function build(opts: {
     creator,
     rememberRecentChatWorkspace,
     rememberAutoQuantDefaultWorkspace,
+    rememberAutoPredictionDefaultWorkspace,
     setTerminalViewAttributes,
   };
 }
@@ -772,6 +840,36 @@ describe('POST /quick-chat — native auth and explicit credential overrides', (
     expect(rememberRecentChatWorkspace).not.toHaveBeenCalled();
   });
 
+  it('initializes the first Chat workspace without pinning a Harness version', async () => {
+    const { app, creator, rememberRecentChatWorkspace } = build();
+    const response = await app.request('/chat/initialize', { method: 'POST' });
+    const body = await response.json() as any;
+
+    expect(response.status).toBe(201);
+    expect(body.workspace).toMatchObject({ tag: 'chat', template: 'chat' });
+    expect(creator.create).toHaveBeenCalledWith('chat', 'chat');
+    expect(rememberRecentChatWorkspace).toHaveBeenCalledWith('ws-1');
+  });
+
+  it('reuses an existing Chat workspace instead of creating another', async () => {
+    const existing = {
+      id: 'chat-existing',
+      dir: '/chat',
+      template: 'chat',
+      tag: 'chat',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    };
+    const { app, creator, rememberRecentChatWorkspace } = build({ workspaces: [existing] });
+
+    const response = await app.request('/chat/initialize', { method: 'POST' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      workspace: { id: 'chat-existing', template: 'chat' },
+    });
+    expect(creator.create).not.toHaveBeenCalled();
+    expect(rememberRecentChatWorkspace).toHaveBeenCalledWith('chat-existing');
+  });
+
   it('initializes the first AutoQuant Workspace and stores it as the default', async () => {
     const { app, creator, rememberAutoQuantDefaultWorkspace } = build();
     const response = await app.request('/auto-quant/initialize', { method: 'POST' });
@@ -852,6 +950,53 @@ describe('POST /quick-chat — native auth and explicit credential overrides', (
     expect(r.status).toBe(400);
     expect(r.body.error).toBe('auto_quant_workspace_not_default');
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('requires Auto Prediction initialization instead of creating a Workspace from the composer', async () => {
+    const { app, creator } = build();
+    const r = await quickChat(app, {
+      prompt: 'evaluate this market',
+      agent: 'claude',
+      template: 'auto-prediction',
+    });
+
+    expect(r.status).toBe(409);
+    expect(r.body.error).toBe('auto_prediction_not_initialized');
+    expect(creator.create).not.toHaveBeenCalled();
+  });
+
+  it('initializes the first Auto Prediction Workspace and stores it as the default', async () => {
+    const { app, creator, rememberAutoPredictionDefaultWorkspace } = build();
+    const response = await app.request('/auto-prediction/initialize', { method: 'POST' });
+    const body = await response.json() as any;
+
+    expect(response.status).toBe(201);
+    expect(body.workspace).toMatchObject({ tag: 'prediction', template: 'auto-prediction' });
+    expect(creator.create).toHaveBeenCalledWith('prediction', 'auto-prediction');
+    expect(rememberAutoPredictionDefaultWorkspace).toHaveBeenCalledWith('ws-1');
+  });
+
+  it('uses the selected Auto Prediction default for targetless research', async () => {
+    const existing = {
+      id: 'prediction-existing',
+      dir: '/prediction',
+      template: 'auto-prediction',
+      tag: 'prediction',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    };
+    const { app, creator, spawn } = build({
+      workspaces: [existing],
+      autoPredictionDefaultWorkspaceId: existing.id,
+    });
+
+    const r = await quickChat(app, {
+      prompt: 'evaluate this market',
+      agent: 'claude',
+      template: 'auto-prediction',
+    });
+    expect(r.status).toBe(201);
+    expect((spawn.mock.calls[0] as any[])[0]).toBe(existing.id);
+    expect(creator.create).not.toHaveBeenCalled();
   });
 
   // targetWsId — the chat sidebar's per-workspace "+": spawn INTO the given

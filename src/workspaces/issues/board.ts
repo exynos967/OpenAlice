@@ -27,7 +27,7 @@ import type {
   HeadlessTaskRecord,
   HeadlessTaskStatus,
 } from '../headless-task-registry.js'
-import type { IssuePriority, IssueRecord, IssueStatus } from './declaration.js'
+import type { IssuePriority, IssueRecord, IssueStatus, IssueTimeout } from './declaration.js'
 import type { IssueComment } from './comments.js'
 import type { IssueAutomationHealth } from './automation-health.js'
 import { issueRunFailure, type IssueRunFailure } from './run-failure.js'
@@ -48,6 +48,8 @@ export interface IssuesSnapshotIssue {
   credentialSource?: 'native'
   model?: string
   effort?: ModelReasoningEffort
+  /** Optional scheduled-run watchdog; omit for no limit. */
+  timeout?: IssueTimeout
   /** Present iff the issue self-schedules. */
   when?: Schedule
   /** When the scanner last fired this issue (epoch ms); only for scheduled issues. */
@@ -56,6 +58,10 @@ export interface IssuesSnapshotIssue {
   nextDueAtMs?: number | null
   /** Live scheduler/worker health; present iff the Issue has a schedule. */
   automationHealth?: IssueAutomationHealth
+  /** Adapter id when this row is that connector's phone-desk Issue. */
+  connectorDesk?: string
+  /** @deprecated Dual-read of the 0.89.4 Telegram-only flag. */
+  telegramConnector?: true
   /** True iff this issue's NAME (title, case-insensitive) is also used by an
    *  issue in a DIFFERENT workspace. A name is a global team object, so a clash
    *  across workspaces is ambiguous and the UI warns on it. DETECTION ONLY — we
@@ -149,6 +155,7 @@ export interface BoardRow {
   credentialSource?: 'native'
   model?: string
   effort?: ModelReasoningEffort
+  timeout?: IssueTimeout
   /** True iff the issue self-schedules (snapshot `when` present). */
   scheduled: boolean
   /** Live scheduler/worker health for scheduled rows. */
@@ -193,6 +200,7 @@ export function flattenBoardRows(snapshot: IssuesSnapshot): {
         ...(issue.credentialSource ? { credentialSource: issue.credentialSource } : {}),
         ...(issue.model ? { model: issue.model } : {}),
         ...(issue.effort ? { effort: issue.effort } : {}),
+        ...(issue.timeout ? { timeout: issue.timeout } : {}),
         scheduled: issue.when !== undefined,
         ...(issue.automationHealth ? { automationHealth: issue.automationHealth } : {}),
         workspace: { wsId: ws.wsId, tag: ws.tag },
@@ -246,12 +254,17 @@ export interface IssueDetailIssue {
   credentialSource?: 'native'
   model?: string
   effort?: ModelReasoningEffort
+  timeout?: IssueTimeout
+  /** Optional comment-reply Input Prompt template. Omission keeps the default wrapper. */
+  commentPrompt?: string
   /** When the scanner last fired this issue (epoch ms); only for scheduled issues. */
   lastFiredAtMs?: number | null
   /** When it is next due (epoch ms); only for scheduled issues. */
   nextDueAtMs?: number | null
   /** Live scheduler/worker health; present iff the Issue has a schedule. */
   automationHealth?: IssueAutomationHealth
+  connectorDesk?: string
+  telegramConnector?: true
 }
 
 /** GET /api/issues/:wsId/:id — one issue + its human-facing Activity timeline,
@@ -336,6 +349,9 @@ export interface IssueRunRecord {
   signal?: string | null
   killed?: boolean
   error?: string
+  /** Positive watchdog budget, `null` for an explicitly unlimited new run,
+   * absent only on historical records. */
+  timeoutMs?: number | null
   output?: HeadlessTaskOutputSummary
   /** Read-side explanation for non-successful scheduled execution. Derived
    * from durable fields so old registry entries need no migration. */
@@ -368,6 +384,7 @@ export function issueRunRecord(task: HeadlessTaskRecord, resumable: boolean): Is
     ...(task.signal !== undefined ? { signal: task.signal } : {}),
     ...(task.killed !== undefined ? { killed: task.killed } : {}),
     ...(task.error !== undefined ? { error: task.error } : {}),
+    ...(task.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs } : {}),
     ...(task.output !== undefined ? { output: task.output } : {}),
     ...(failure ? { failure } : {}),
     resumable,
@@ -432,6 +449,9 @@ export function detailIssue(
     ...(issue.credentialSource ? { credentialSource: issue.credentialSource } : {}),
     ...(issue.model ? { model: issue.model } : {}),
     ...(issue.effort ? { effort: issue.effort } : {}),
+    ...(issue.timeout ? { timeout: issue.timeout } : {}),
+    ...(issue.commentPrompt ? { commentPrompt: issue.commentPrompt } : {}),
+    ...(issue.connectorDesk ? { connectorDesk: issue.connectorDesk, telegramConnector: issue.connectorDesk === 'telegram' ? true as const : undefined } : {}),
     ...(markers ? {
       lastFiredAtMs: markers.lastFiredAtMs,
       nextDueAtMs: markers.nextDueAtMs,
@@ -458,6 +478,8 @@ export function snapshotBoardIssue(
     ...(issue.credentialSource ? { credentialSource: issue.credentialSource } : {}),
     ...(issue.model ? { model: issue.model } : {}),
     ...(issue.effort ? { effort: issue.effort } : {}),
+    ...(issue.timeout ? { timeout: issue.timeout } : {}),
+    ...(issue.connectorDesk ? { connectorDesk: issue.connectorDesk, telegramConnector: issue.connectorDesk === 'telegram' ? true as const : undefined } : {}),
     ...(issue.when ? { when: issue.when } : {}),
     ...(markers ? {
       lastFiredAtMs: markers.lastFiredAtMs,

@@ -32,9 +32,13 @@ export interface WorkspacesContextValue {
   readonly autoQuantDefaultWorkspaceId: string | null
   readonly autoQuantPreferenceLoaded: boolean
   readonly autoQuantPreferenceError: string | null
+  readonly autoPredictionDefaultWorkspaceId?: string | null
+  readonly autoPredictionPreferenceLoaded?: boolean
+  readonly autoPredictionPreferenceError?: string | null
   refresh(): Promise<void>
   refreshTemplates(): Promise<void>
   refreshAutoQuantPreference(): Promise<void>
+  refreshAutoPredictionPreference?(): Promise<void>
   refreshWorkspaceManager(): Promise<void>
   quickStartWorkspaceManager(
     prompt: string,
@@ -53,13 +57,16 @@ export interface WorkspacesContextValue {
   setDefaultAgent(agent: string | null): Promise<void>
   setIssueDefaultAgent(agent: string | null): Promise<void>
   initializeAutoQuant(): Promise<Workspace>
+  initializeAutoPrediction?(): Promise<Workspace>
+  initializeChat(): Promise<Workspace>
   setAutoQuantDefaultWorkspace(workspaceId: string): Promise<void>
+  setAutoPredictionDefaultWorkspace?(workspaceId: string): Promise<void>
   quickChat(
     prompt: string,
     agent?: string,
     credentialSlug?: string,
     targetWsId?: string,
-    template?: 'chat' | 'auto-quant-v2',
+    template?: 'chat' | 'auto-quant-v2' | 'auto-prediction',
     model?: string | null,
     reasoningEffort?: import('../api').ModelReasoningEffort,
     credentialSource?: 'native',
@@ -68,6 +75,21 @@ export interface WorkspacesContextValue {
   resumeSession(wsId: string, sessionId: string, source?: WorkspaceSource): Promise<void>
   openWebPiSession(wsId: string, sessionId: string, source?: WorkspaceSource): Promise<void>
   requestDeleteSession(wsId: string, sessionId: string): void
+  setSessionPresence(
+    wsId: string,
+    resumeId: string,
+    presence: import('../components/workspace/api').SessionPresence,
+  ): Promise<void>
+  setSessionDisplayName(
+    wsId: string,
+    resumeId: string,
+    displayName: string | null,
+  ): Promise<void>
+  updateSessionRuntime(
+    wsId: string,
+    sessionId: string,
+    update: import('../components/workspace/api').PausedSessionRuntimeUpdate,
+  ): Promise<void>
   openAgentConfig(wsId: string, agent?: AgentId, section?: 'general' | 'launch' | 'ai' | 'template' | 'absorb'): void
   saveWorkspaceMetadata(
     wsId: string,

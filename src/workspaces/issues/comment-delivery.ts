@@ -11,7 +11,12 @@ import {
   type IssueComment,
   type IssueCommentDelivery,
 } from './comments.js'
+import { renderIssueCommentPrompt } from './comment-prompt.js'
 import { issueAssigneeResumeId, type IssueRecord } from './declaration.js'
+import {
+  projectDeskComment,
+  projectWorkspaceDeskFailure,
+} from './telegram-desk-project.js'
 
 const COMMENT_REPLY_TIMEOUT_MS = 300_000
 
@@ -25,14 +30,14 @@ export function issueCommentReplyPrompt(input: {
   issue: IssueRecord
   comment: IssueComment
 }): string {
-  return [
-    `A new comment was left on Issue ${input.issueWorkspaceId}/${input.issue.id} (${input.issue.title}) by ${input.comment.author}.`,
-    '',
-    input.comment.markdown,
-    '',
-    'Reply directly to this comment. Your final assistant response will be recorded automatically in the Issue Activity timeline.',
-    'Do not call `alice-workspace issue comment` for this reply; that would create a second notification loop.',
-  ].join('\n')
+  return renderIssueCommentPrompt(input.issue.commentPrompt, {
+    comment: input.comment.markdown,
+    title: input.issue.title,
+    id: input.issue.id,
+    workspaceId: input.issueWorkspaceId,
+    author: input.comment.author,
+    what: input.issue.what,
+  })
 }
 
 /**
@@ -183,9 +188,14 @@ export async function recordIssueCommentReply(input: {
       },
     )
     if (!updated.ok) throw new Error(updated.error)
+    await projectDeskComment(appended.issue, appended.comment).catch(() => undefined)
     return 'replied'
   }
 
+  const failureText = input.error
+    ?? (input.status === 'done'
+      ? 'The Issue reply Agent finished without a final reply.'
+      : `The Issue reply run ended as ${input.status}.`)
   const updated = await updateIssueCommentDelivery(
     input.issueWorkspaceDir,
     input.issueId,
@@ -194,12 +204,15 @@ export async function recordIssueCommentReply(input: {
       state: 'failed',
       targetResumeId: input.task.resumeId,
       taskId: input.task.taskId,
-      error: input.error
-        ?? (input.status === 'done'
-          ? 'The Issue reply Agent finished without a final reply.'
-          : `The Issue reply run ended as ${input.status}.`),
+      error: failureText,
     },
   )
   if (!updated.ok) throw new Error(updated.error)
+  await projectWorkspaceDeskFailure({
+    wsDir: input.issueWorkspaceDir,
+    issueId: input.issueId,
+    conversationId: input.sourceCommentId,
+    text: `The Agent could not complete this reply: ${failureText}`,
+  }).catch(() => undefined)
   return 'failed'
 }

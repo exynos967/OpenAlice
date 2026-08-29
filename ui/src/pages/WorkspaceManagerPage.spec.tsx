@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { WorkspacesContextValue } from '../contexts/workspaces-context'
 import type { AgentInfo, ManagerWorkspaceSnapshot, SessionRecord } from '../components/workspace/api'
+import { resetAgentRuntimesStore } from '../hooks/useAgentRuntimes'
 import { i18n } from '../i18n'
 import { WorkspaceManagerPage } from './WorkspaceManagerPage'
 
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   getWorkspaceManager: vi.fn(),
   getAgentRuntimeReadiness: vi.fn(),
   probeAgentRuntimeReadiness: vi.fn(),
+  listAgents: vi.fn(),
   listAgentCredentials: vi.fn(),
   detectWorkspaceCredential: vi.fn(),
   getAgentReadiness: vi.fn(),
@@ -46,6 +48,7 @@ vi.mock('../components/workspace/api', async (importOriginal) => {
     getWorkspaceManager: mocks.getWorkspaceManager,
     getAgentRuntimeReadiness: mocks.getAgentRuntimeReadiness,
     probeAgentRuntimeReadiness: mocks.probeAgentRuntimeReadiness,
+    listAgents: mocks.listAgents,
     listAgentCredentials: mocks.listAgentCredentials,
     detectWorkspaceCredential: mocks.detectWorkspaceCredential,
     getAgentReadiness: mocks.getAgentReadiness,
@@ -96,10 +99,14 @@ vi.mock('../components/workspace/WebPiView', () => ({
   WebPiView: () => <div data-testid="webpi-view" />,
 }))
 
-const runtimeIds = ['claude', 'codex', 'opencode', 'pi'] as const
+const runtimeIds = ['claude', 'codex', 'cursor', 'agy', 'grok', 'omp', 'opencode', 'pi'] as const
 const runtimeAgents: AgentInfo[] = [
   ['claude', 'Claude'],
   ['codex', 'Codex'],
+  ['cursor', 'Cursor Agent'],
+  ['agy', 'Antigravity'],
+  ['grok', 'Grok Build'],
+  ['omp', 'Oh My Pi'],
   ['opencode', 'OpenCode'],
   ['pi', 'Pi'],
   ['shell', 'Shell'],
@@ -122,8 +129,14 @@ const runtimeAgents: AgentInfo[] = [
           ? ['anthropic' as const]
           : id === 'codex'
             ? ['openai-responses' as const]
-            : ['google-generative-ai' as const, 'openai-chat' as const, 'anthropic' as const, 'openai-responses' as const],
-        ...(id === 'opencode' || id === 'pi'
+            : id === 'cursor'
+              ? ['openai-chat' as const]
+            : id === 'agy'
+              ? ['google-generative-ai' as const]
+            : id === 'grok'
+              ? ['openai-chat' as const, 'openai-responses' as const]
+              : ['google-generative-ai' as const, 'openai-chat' as const, 'anthropic' as const, 'openai-responses' as const],
+        ...(id === 'omp' || id === 'opencode' || id === 'pi'
           ? { modelRegistration: { contextWindow: true, reasoning: true } }
           : {}),
       },
@@ -170,12 +183,16 @@ function context(
     setDefaultAgent: mocks.setDefaultAgent,
     setIssueDefaultAgent: vi.fn(async () => undefined),
     initializeAutoQuant: vi.fn(async () => { throw new Error('not used') }),
+    initializeChat: vi.fn(async () => { throw new Error('not used') }),
     setAutoQuantDefaultWorkspace: vi.fn(async () => undefined),
     quickChat: vi.fn(async () => ''),
     pauseSession: vi.fn(async () => undefined),
     resumeSession: mocks.resumeSession,
     openWebPiSession: mocks.openWebPiSession,
     requestDeleteSession: vi.fn(),
+    setSessionPresence: vi.fn(async () => undefined),
+    setSessionDisplayName: vi.fn(async () => undefined),
+    updateSessionRuntime: vi.fn(async () => undefined),
     openAgentConfig: mocks.openAgentConfig,
     saveWorkspaceMetadata: vi.fn(async () => undefined),
     renameWorkspace: vi.fn(async () => undefined),
@@ -211,11 +228,13 @@ function readiness() {
 
 beforeEach(async () => {
   vi.clearAllMocks()
+  resetAgentRuntimesStore()
   await i18n.changeLanguage('en')
   mocks.useWorkspaces.mockImplementation(() => context('codex'))
   mocks.getWorkspaceManager.mockResolvedValue(managerSnapshot())
   mocks.getAgentRuntimeReadiness.mockResolvedValue(readiness())
   mocks.probeAgentRuntimeReadiness.mockResolvedValue(readiness())
+  mocks.listAgents.mockResolvedValue(runtimeAgents.filter((agent) => agent.kind !== 'utility'))
   mocks.listAgentCredentials.mockResolvedValue([])
   mocks.detectWorkspaceCredential.mockResolvedValue({
     configured: false,
@@ -341,12 +360,13 @@ describe('WorkspaceManagerPage runtime selection', () => {
     expect(mocks.openAgentConfig).toHaveBeenCalledWith('workspace-manager', 'codex', 'ai')
     fireEvent.click(picker)
 
-    for (const name of ['Claude', 'Codex', 'OpenCode', 'Pi']) {
-      expect(screen.getByRole('menuitem', { name })).toBeTruthy()
-    }
+    expect(screen.getByRole('menuitem', { name: /Claude/ })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: /Codex/ })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: i18n.t('chatLanding.otherRuntimes') })).toBeTruthy()
+    expect(screen.getAllByRole('menuitem').length).toBeLessThanOrEqual(5)
     expect(screen.queryByRole('menuitem', { name: 'Shell' })).toBeNull()
 
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Claude' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /Claude/ }))
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Inspect the floor.' } })
     fireEvent.click(screen.getByRole('button', { name: 'Start manager' }))
 
@@ -389,12 +409,66 @@ describe('WorkspaceManagerPage runtime selection', () => {
     expect(await findModelEditor('MiniMax-M2.5')).toBeTruthy()
     expect(screen.queryByText('Saved in this workspace')).toBeNull()
     expect(screen.queryByText(/context$/)).toBeNull()
-    expect(screen.getByRole('status').textContent).toContain('Claude Code still needs its own first-run setup')
+    expect(screen.getByRole('status').textContent).toContain('Claude still needs its own first-run setup')
     expect(mocks.listAgentCredentials).toHaveBeenCalledWith('claude')
     expect(mocks.getAgentReadiness).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Adjust workspace AI' }))
     expect(mocks.openAgentConfig).toHaveBeenCalledWith('workspace-manager', 'claude', 'ai')
+  })
+
+  it('names Grok Build in the native first-run trust gate', async () => {
+    mocks.useWorkspaces.mockImplementation(() => context('grok'))
+    mocks.detectWorkspaceCredential.mockResolvedValue({
+      configured: false,
+      slug: null,
+      model: null,
+      contextWindow: null,
+      wireShape: null,
+      interactiveSetupStatus: 'workspace-trust-required',
+    })
+
+    render(<WorkspaceManagerPage spec={{ kind: 'workspace-manager', params: {} }} />)
+
+    const notice = await screen.findByRole('status')
+    expect(notice.textContent).toContain('Grok Build will ask you to trust this workspace')
+    expect(notice.textContent).not.toContain('Claude')
+  })
+
+  it('keeps the inherited Vault catalog when Grok was not explicitly reselected', async () => {
+    mocks.useWorkspaces.mockImplementation(() => context('grok'))
+    mocks.listAgentCredentials.mockResolvedValue([{
+      slug: 'openrouter-1',
+      label: 'OpenRouter',
+      vendor: 'openrouter',
+      authType: 'api-key',
+      wires: { 'openai-chat': 'https://openrouter.ai/api/v1' },
+      resolvedModel: 'anthropic/claude-sonnet-4.6',
+    }])
+    mocks.getQuickChat.mockResolvedValue({
+      lastCredentialByAgent: { grok: 'openrouter-1' },
+      recentChatWorkspaceId: null,
+    })
+    mocks.getPresets.mockResolvedValue({
+      presets: [{
+        id: 'openrouter',
+        label: 'OpenRouter',
+        models: [
+          { id: 'anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
+          { id: 'openai/gpt-5.6', label: 'GPT 5.6' },
+        ],
+      }],
+    })
+
+    render(<WorkspaceManagerPage spec={{ kind: 'workspace-manager', params: {} }} />)
+
+    expect(await findModelEditor('anthropic/claude-sonnet-4.6')).toBeTruthy()
+    await waitFor(() => {
+      const options = [...document.querySelectorAll('datalist option')]
+        .map((option) => option.getAttribute('value'))
+      expect(options).toEqual(['anthropic/claude-sonnet-4.6', 'openai/gpt-5.6'])
+      expect(options).not.toContain('grok-4.6')
+    })
   })
 
   it('shows and launches the Manager workspace model/context from the shared config', async () => {

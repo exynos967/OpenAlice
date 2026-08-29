@@ -14,16 +14,20 @@ import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import {
-  createSupervisorInstance,
+  createSupervisorAliceProject,
+  isNewerSupervisorSchemaError,
+  isSupervisorConfigError,
   parseSupervisorConfig,
-  persistInstanceLaunchConfig,
+  persistAliceProjectLaunchConfig,
   persistMachineLaunchConfig,
-  persistSelectedSupervisorInstance,
+  persistSelectedSupervisorAliceProject,
   readMachineLaunchConfig,
-  readSupervisorInstanceRegistry,
+  readSupervisorAliceProjectRegistry,
+  readSupervisorConfig,
   resolveAvailableStoredLaunchContext,
   resolveStoredLaunchContext,
   supervisorConfigPath,
+  writeSupervisorConfig,
 } from './supervisor-config.ts'
 
 const temporaryPaths: string[] = []
@@ -35,7 +39,7 @@ afterEach(async () => {
 })
 
 describe('Supervisor configuration', () => {
-  it('loads machine and selected-instance layers below environment and flags', async () => {
+  it('loads machine and selected-project layers below environment and flags', async () => {
     const context = await resolveStoredLaunchContext({
       port: 44_000,
     }, {
@@ -57,29 +61,29 @@ describe('Supervisor configuration', () => {
         instances: {
           research: {
             name: 'research',
-            home: '/instance-home',
+            home: '/project-home',
             port: 42_000,
-            appDir: '/instance-app',
+            appDir: '/project-app',
           },
         },
       }),
     })
 
     expect(context).toMatchObject({
-      instance: 'research',
+      project: 'research',
       home: resolve('/env-home'),
       port: 44_000,
-      appDir: resolve('/instance-app'),
+      appDir: resolve('/project-app'),
       provenance: {
-        instance: { source: 'machine-config' },
+        project: { source: 'machine-config' },
         home: { source: 'environment' },
         port: { source: 'cli-flag' },
-        appDir: { source: 'instance-config' },
+        appDir: { source: 'project-config' },
       },
     })
   })
 
-  it('falls back to an available instance only after a stored default home becomes unavailable', async () => {
+  it('falls back to an available AliceProject only after a stored default home becomes unavailable', async () => {
     const root = await mkdtemp(join(tmpdir(), 'openalice-supervisor-recovery-'))
     temporaryPaths.push(root)
     const config = {
@@ -106,12 +110,12 @@ describe('Supervisor configuration', () => {
 
     const fallback = await resolveAvailableStoredLaunchContext(options)
     expect(fallback).toMatchObject({
-      instance: 'default',
+      project: 'default',
       home: resolve(root, 'user/.openalice'),
       provenance: {
-        instance: {
+        project: {
           source: 'machine-config',
-          detail: 'machine.defaultInstance',
+          detail: 'machine.defaultProject',
         },
         home: {
           source: 'default',
@@ -120,7 +124,7 @@ describe('Supervisor configuration', () => {
     })
   })
 
-  it('persists an instance source atomically outside the selected home', async () => {
+  it('persists an AliceProject source atomically outside the selected home', async () => {
     const root = await mkdtemp(join(tmpdir(), 'openalice-supervisor-config-'))
     temporaryPaths.push(root)
     const context = await resolveStoredLaunchContext({}, {
@@ -130,7 +134,7 @@ describe('Supervisor configuration', () => {
       env: { XDG_CONFIG_HOME: join(root, 'config') },
     })
 
-    await persistInstanceLaunchConfig(context, {
+    await persistAliceProjectLaunchConfig(context, {
       appDir: '/srv/OpenAlice',
     })
 
@@ -138,8 +142,8 @@ describe('Supervisor configuration', () => {
       await readFile(supervisorConfigPath(context.supervisorRoot), 'utf8'),
     )
     expect(saved).toEqual({
-      schemaVersion: 1,
-      instances: {
+      schemaVersion: 2,
+      projects: {
         default: {
           name: 'default',
           appDir: '/srv/OpenAlice',
@@ -156,12 +160,12 @@ describe('Supervisor configuration', () => {
     })
     expect(resolved.appDir).toBe(resolve('/srv/OpenAlice'))
     expect(resolved.provenance.appDir).toEqual({
-      source: 'instance-config',
-      detail: 'instance.default.appDir',
+      source: 'project-config',
+      detail: 'project.default.appDir',
     })
   })
 
-  it('removes an instance override when a setting returns to inheritance', async () => {
+  it('removes an AliceProject override when a setting returns to inheritance', async () => {
     const root = await mkdtemp(join(tmpdir(), 'openalice-supervisor-inherit-'))
     temporaryPaths.push(root)
     const context = await resolveStoredLaunchContext({}, {
@@ -170,24 +174,24 @@ describe('Supervisor configuration', () => {
       env: { XDG_CONFIG_HOME: join(root, 'config') },
     })
 
-    await persistInstanceLaunchConfig(context, {
+    await persistAliceProjectLaunchConfig(context, {
       port: 49_001,
       updateChecks: false,
     })
-    await persistInstanceLaunchConfig(context, {
+    await persistAliceProjectLaunchConfig(context, {
       port: undefined,
     })
 
     const saved = JSON.parse(
       await readFile(supervisorConfigPath(context.supervisorRoot), 'utf8'),
     )
-    expect(saved.instances.default).toEqual({
+    expect(saved.projects.default).toEqual({
       name: 'default',
       updateChecks: false,
     })
   })
 
-  it('persists machine defaults below instance, environment, and CLI layers', async () => {
+  it('persists machine defaults below AliceProject, environment, and CLI layers', async () => {
     const root = await mkdtemp(join(tmpdir(), 'openalice-supervisor-machine-'))
     temporaryPaths.push(root)
     const homeDir = join(root, 'user')
@@ -227,7 +231,7 @@ describe('Supervisor configuration', () => {
       },
     })
 
-    await persistInstanceLaunchConfig(inherited, { port: 48_002 })
+    await persistAliceProjectLaunchConfig(inherited, { port: 48_002 })
     const overridden = await resolveStoredLaunchContext({ port: 48_004 }, {
       homeDir,
       platform: 'linux',
@@ -250,8 +254,8 @@ describe('Supervisor configuration', () => {
     await expect(readMachineLaunchConfig(context)).resolves.toEqual({})
   })
 
-  it('creates, lists, selects, and remembers named complete-home instances', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'openalice-supervisor-instances-'))
+  it('creates, lists, selects, and remembers named complete-home AliceProjects', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openalice-supervisor-projects-'))
     temporaryPaths.push(root)
     const homeDir = join(root, 'user')
     const configRoot = join(root, 'config')
@@ -262,7 +266,7 @@ describe('Supervisor configuration', () => {
       env: { XDG_CONFIG_HOME: configRoot },
     })
 
-    await createSupervisorInstance(
+    await createSupervisorAliceProject(
       context,
       'research',
       './research-home',
@@ -270,23 +274,25 @@ describe('Supervisor configuration', () => {
     )
     const researchHome = await realpath(resolve(root, 'research-home'))
 
-    const registry = await readSupervisorInstanceRegistry(context, {
+    const registry = await readSupervisorAliceProjectRegistry(context, {
       homeDir,
       cwd: root,
       platform: 'linux',
     })
-    expect(registry).toEqual({
-      defaultInstance: 'research',
-      instances: [
+    expect(registry).toMatchObject({
+      defaultProject: 'research',
+      projects: [
         {
-          name: 'default',
+          key: 'default',
+          displayName: 'Default AliceProject',
           home: resolve(homeDir, '.openalice'),
           port: 47_331,
           portAutomatic: true,
           isDefault: false,
         },
         {
-          name: 'research',
+          key: 'research',
+          displayName: 'Research',
           home: researchHome,
           port: 47_331,
           portAutomatic: true,
@@ -302,39 +308,125 @@ describe('Supervisor configuration', () => {
       env: { XDG_CONFIG_HOME: configRoot },
     })
     expect(selected).toMatchObject({
-      instance: 'research',
+      project: 'research',
       home: researchHome,
     })
 
-    await persistSelectedSupervisorInstance(context, 'default')
+    await persistSelectedSupervisorAliceProject(context, 'default')
     const saved = JSON.parse(
       await readFile(supervisorConfigPath(context.supervisorRoot), 'utf8'),
     )
-    expect(saved.defaultInstance).toBeUndefined()
-    expect(saved.instances.research.home).toBe(researchHome)
+    expect(saved.defaultProject).toBeUndefined()
+    expect(saved.projects.research.home).toBe(researchHome)
     expect((await stat(researchHome)).isDirectory()).toBe(true)
+    expect(saved.projects.research.product).toBeUndefined()
+  })
 
-    await rm(researchHome, {
-      recursive: true,
-      force: true,
-    })
-    await expect(persistSelectedSupervisorInstance(
-      context,
-      'research',
-      { homeDir, cwd: root, platform: 'linux' },
-    )).rejects.toThrow(/Registered complete home .* is missing/)
-    expect(JSON.parse(
-      await readFile(supervisorConfigPath(context.supervisorRoot), 'utf8'),
-    ).defaultInstance).toBeUndefined()
-    await expect(resolveStoredLaunchContext({ instance: 'research' }, {
+  it('registers a transferred AliceProject without changing the remote default', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openalice-supervisor-transfer-register-'))
+    temporaryPaths.push(root)
+    const homeDir = join(root, 'user')
+    const context = await resolveStoredLaunchContext({}, {
       homeDir,
       cwd: root,
       platform: 'linux',
-      env: { XDG_CONFIG_HOME: configRoot },
-    })).rejects.toThrow(/Registered complete home .* is missing/)
+      env: { XDG_CONFIG_HOME: join(root, 'config') },
+    })
+    await createSupervisorAliceProject(
+      context,
+      'research',
+      join(root, 'research-home'),
+      { homeDir, cwd: root, platform: 'linux' },
+    )
+    await createSupervisorAliceProject(
+      context,
+      'migrated',
+      join(root, 'migrated-home'),
+      {
+        homeDir,
+        cwd: root,
+        platform: 'linux',
+        displayName: 'Migrated Alice',
+        select: false,
+      },
+    )
+
+    const registry = await readSupervisorAliceProjectRegistry(context, {
+      homeDir,
+      cwd: root,
+      platform: 'linux',
+    })
+    expect(registry.defaultProject).toBe('research')
+    expect(registry.projects.find((project) => project.key === 'migrated')).toMatchObject({
+      displayName: 'Migrated Alice',
+      isDefault: false,
+    })
   })
 
-  it('rejects duplicate, overlapping, and home-less named instances', async () => {
+  it('stamps NanoAlice product on create and does not rewrite it later', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openalice-supervisor-nano-'))
+    temporaryPaths.push(root)
+    const homeDir = join(root, 'user')
+    const context = await resolveStoredLaunchContext({}, {
+      homeDir,
+      cwd: root,
+      platform: 'linux',
+      env: { XDG_CONFIG_HOME: join(root, 'config') },
+    })
+    await createSupervisorAliceProject(
+      context,
+      'office',
+      join(root, 'office-home'),
+      { homeDir, cwd: root, platform: 'linux', product: 'nano' },
+    )
+    const officeHome = await realpath(join(root, 'office-home'))
+    const { aliceProjectProductStampPath } = await import('./alice-project-product.ts')
+    expect(JSON.parse(await readFile(aliceProjectProductStampPath(officeHome), 'utf8'))).toEqual({
+      version: 1,
+      product: 'nano',
+    })
+    const selected = await resolveStoredLaunchContext({}, {
+      homeDir,
+      cwd: root,
+      platform: 'linux',
+      env: { XDG_CONFIG_HOME: join(root, 'config') },
+    })
+    await persistAliceProjectLaunchConfig(selected, { port: 48_010 })
+    const saved = JSON.parse(await readFile(supervisorConfigPath(context.supervisorRoot), 'utf8'))
+    expect(saved.projects.office.product).toBe('nano')
+    expect(saved.projects.office.port).toBe(48_010)
+  })
+
+  it('rejects registration when an existing home was born as another product', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openalice-supervisor-product-conflict-'))
+    temporaryPaths.push(root)
+    const homeDir = join(root, 'user')
+    const projectHome = join(root, 'existing-home')
+    const context = await resolveStoredLaunchContext({}, {
+      homeDir,
+      cwd: root,
+      platform: 'linux',
+      env: { XDG_CONFIG_HOME: join(root, 'config') },
+    })
+    const { writeAliceProjectProductStamp } = await import('./alice-project-product.ts')
+    await writeAliceProjectProductStamp(projectHome, 'nano')
+
+    await expect(createSupervisorAliceProject(
+      context,
+      'office',
+      projectHome,
+      { homeDir, cwd: root, platform: 'linux', product: 'trader' },
+    )).rejects.toThrow(/was born as nano; it cannot be registered as trader/)
+
+    const saved = await readSupervisorAliceProjectRegistry(context, {
+      homeDir,
+      cwd: root,
+      platform: 'linux',
+    })
+    expect(saved.projects.map((project) => project.key)).not.toContain('office')
+  })
+
+  it('rejects duplicate, overlapping, and home-less named AliceProjects', async () => {
     const root = await mkdtemp(join(tmpdir(), 'openalice-supervisor-collision-'))
     temporaryPaths.push(root)
     const homeDir = join(root, 'user')
@@ -345,20 +437,20 @@ describe('Supervisor configuration', () => {
       env: { XDG_CONFIG_HOME: join(root, 'config') },
     })
 
-    await expect(createSupervisorInstance(
+    await expect(createSupervisorAliceProject(
       context,
       'nested',
       join(context.home, 'child'),
       { homeDir, cwd: root, platform: 'linux' },
-    )).rejects.toThrow(/overlaps instance "default"/)
+    )).rejects.toThrow(/overlaps AliceProject "Default AliceProject"/)
 
-    await createSupervisorInstance(
+    await createSupervisorAliceProject(
       context,
       'paper',
       join(root, 'paper-home'),
       { homeDir, cwd: root, platform: 'linux' },
     )
-    await expect(createSupervisorInstance(
+    await expect(createSupervisorAliceProject(
       context,
       'paper',
       join(root, 'another-home'),
@@ -368,7 +460,7 @@ describe('Supervisor configuration', () => {
     const unrelated = join(root, 'unrelated')
     await mkdir(unrelated)
     await writeFile(join(unrelated, 'notes.txt'), 'not OpenAlice')
-    await expect(createSupervisorInstance(
+    await expect(createSupervisorAliceProject(
       context,
       'unsafe',
       unrelated,
@@ -381,7 +473,7 @@ describe('Supervisor configuration', () => {
       platform: 'linux',
       env: { XDG_CONFIG_HOME: join(root, 'config') },
     })
-    await expect(persistInstanceLaunchConfig(
+    await expect(persistAliceProjectLaunchConfig(
       selected,
       { home: undefined },
     )).rejects.toThrow(/must keep an explicit complete home/)
@@ -410,23 +502,23 @@ describe('Supervisor configuration', () => {
       throw error
     }
 
-    await persistInstanceLaunchConfig(
+    await persistAliceProjectLaunchConfig(
       context,
       { home: join(actual, 'default-home') },
       { homeDir, cwd: root, platform: 'linux' },
     )
-    await expect(createSupervisorInstance(
+    await expect(createSupervisorAliceProject(
       context,
       'nested',
       join(alias, 'default-home', 'nested'),
       { homeDir, cwd: root, platform: 'linux' },
-    )).rejects.toThrow(/overlaps instance "default"/)
+    )).rejects.toThrow(/overlaps AliceProject/)
   })
 
   it('rejects corrupt, unknown, and mismatched configuration fields', () => {
     expect(() => parseSupervisorConfig({
-      schemaVersion: 2,
-    })).toThrow(/schemaVersion must be 1/)
+      schemaVersion: 0,
+    })).toThrow(/schemaVersion must be 2/)
     expect(() => parseSupervisorConfig({
       schemaVersion: 1,
       surprise: true,
@@ -441,5 +533,126 @@ describe('Supervisor configuration', () => {
       schemaVersion: 1,
       defaultInstance: 'missing',
     })).toThrow(/not present in instances/)
+    expect(() => parseSupervisorConfig({
+      schemaVersion: 2,
+      extra: true,
+      defaults: { port: 'nope' },
+    })).toThrow(/defaults.port must be an integer/)
+  })
+
+  it('reports a newer schemaVersion before unknown-field validation', () => {
+    try {
+      parseSupervisorConfig({
+        schemaVersion: 3,
+        surprise: true,
+        defaults: { futureDefault: true },
+      })
+      throw new Error('expected newer schemaVersion to fail')
+    } catch (error) {
+      expect(isNewerSupervisorSchemaError(error)).toBe(true)
+      expect(isSupervisorConfigError(error)).toBe(true)
+      expect(error).toMatchObject({
+        code: 'ESUPERVISORSCHEMA',
+        exitCode: 2,
+      })
+      expect((error as Error).message).toMatch(/schemaVersion 3 is newer than this OpenAlice/)
+      expect((error as Error).message).not.toMatch(/unknown field/)
+      expect((error as Error).message).not.toMatch(/must be 2/)
+    }
+  })
+
+  it('preserves additive current-schema fields through parse and write', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openalice-supervisor-forward-'))
+    temporaryPaths.push(root)
+    const researchHome = join(root, 'research-home')
+    await mkdir(researchHome, { recursive: true })
+    const parsed = parseSupervisorConfig({
+      schemaVersion: 2,
+      futureRoot: 'keep-root',
+      defaults: {
+        port: 48_001,
+        futureDefault: { enabled: true },
+      },
+      projects: {
+        research: {
+          name: 'research',
+          home: researchHome,
+          futureProject: ['a', 1],
+        },
+      },
+    })
+    expect(parsed).toEqual({
+      schemaVersion: 2,
+      futureRoot: 'keep-root',
+      defaults: {
+        port: 48_001,
+        futureDefault: { enabled: true },
+      },
+      projects: {
+        research: {
+          name: 'research',
+          home: researchHome,
+          futureProject: ['a', 1],
+        },
+      },
+    })
+
+    const context = await resolveStoredLaunchContext({ project: 'research' }, {
+      homeDir: join(root, 'user'),
+      cwd: root,
+      platform: 'linux',
+      env: { XDG_CONFIG_HOME: join(root, 'config') },
+      readConfig: async () => parsed,
+    })
+    await writeSupervisorConfig(context.supervisorRoot, parsed)
+    await expect(readSupervisorConfig(context.supervisorRoot)).resolves.toEqual(parsed)
+
+    await persistAliceProjectLaunchConfig(context, { port: 48_002 }, {
+      homeDir: join(root, 'user'),
+      cwd: root,
+      platform: 'linux',
+    })
+
+    expect(JSON.parse(
+      await readFile(supervisorConfigPath(context.supervisorRoot), 'utf8'),
+    )).toEqual({
+      schemaVersion: 2,
+      futureRoot: 'keep-root',
+      defaults: {
+        port: 48_001,
+        futureDefault: { enabled: true },
+      },
+      projects: {
+        research: {
+          name: 'research',
+          home: researchHome,
+          futureProject: ['a', 1],
+          port: 48_002,
+        },
+      },
+    })
+  })
+
+  it('reads the released v1 instance shape and canonicalizes it as AliceProject v2', () => {
+    expect(parseSupervisorConfig({
+      schemaVersion: 1,
+      defaultInstance: 'research',
+      instances: {
+        research: {
+          name: 'research',
+          home: '/tmp/research',
+        },
+      },
+    })).toEqual({
+      schemaVersion: 2,
+      defaultProject: 'research',
+      projects: {
+        research: {
+          name: 'research',
+          displayName: 'Research',
+          home: '/tmp/research',
+        },
+      },
+    })
   })
 })

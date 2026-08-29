@@ -6,6 +6,7 @@ import type { InquiryRecord } from '../api/inquiries'
 import { useInquiryThread } from '../hooks/useInquiryThread'
 import { formatRelativeTime } from '../lib/intl'
 import { MarkdownContent } from './MarkdownContent'
+import { hasTurnProgress, TurnProgress } from './TurnProgress'
 
 export function InboxReplyThread({
   sender,
@@ -24,9 +25,9 @@ export function InboxReplyThread({
   const records = useMemo(() => [...thread.records].reverse(), [thread.records])
 
   return (
-    <section id="inquiries" className="mt-8 border-t border-border/70 pt-6">
+    <section id="inquiries" className="mt-10 border-t border-border/60 pt-7">
       <div className="flex min-w-0 items-baseline gap-2">
-        <h3 className="text-[13px] font-semibold text-foreground">{t('inbox.repliesTitle')}</h3>
+        <h2 className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground/60">{t('inbox.repliesTitle')}</h2>
         {records.length > 0 && (
           <span className="text-[11px] tabular-nums text-muted-foreground/45">{records.length}</span>
         )}
@@ -128,7 +129,9 @@ function InboxReplyRecord({ record }: { record: InquiryRecord }) {
             </span>
           )}
         </div>
-        {running ? (
+        {running && hasTurnProgress(record.progress) ? (
+          <TurnProgress progress={record.progress} />
+        ) : running ? (
           <p className="mt-1.5 text-[12px] text-muted-foreground/60">{t('inbox.replyWaiting')}</p>
         ) : record.assistantText ? (
           <div className="mt-2 text-[13px] leading-relaxed text-foreground/85">

@@ -13,11 +13,11 @@
  * a data-model change.
  */
 
-export type WorkspaceSource = 'chat' | 'auto-quant'
+export type WorkspaceSource = 'chat' | 'auto-quant' | 'prediction'
 export type FileViewerSource = WorkspaceSource | 'tracked'
 
 /** One source of truth for the Dev sidebar and `/dev/:tab` URL contract. */
-export const DEV_TABS = ['tools', 'onboarding', 'snapshots', 'logs', 'simulator'] as const
+export const DEV_TABS = ['frontend', 'tools', 'onboarding', 'snapshots', 'logs', 'simulator'] as const
 export type DevTab = typeof DEV_TABS[number]
 
 export function isDevTab(value: string): value is DevTab {
@@ -36,12 +36,13 @@ export type ViewSpec =
   | { kind: 'issue-detail';   params: { wsId: string; id: string } }
   | { kind: 'tracked-issue-detail'; params: { wsId: string; id: string } }
   | { kind: 'automation';     params: { section: 'runs' | 'api' } }
+  | { kind: 'office';         params: Record<string, never> }
   | { kind: 'news';           params: Record<string, never> }
   | { kind: 'market-list';    params: Record<string, never> }
   | { kind: 'market-rotation'; params: Record<string, never> }
   | { kind: 'market-board';   params: { board: 'movers' | 'calendar' | 'macro' | 'term-structure' | 'global-macro' | 'shipping' | 'fed' } }
   | { kind: 'market-detail';  params: { assetClass: 'equity' | 'crypto' | 'currency' | 'commodity'; symbol: string; source?: string } }
-  | { kind: 'settings';       params: { category: 'general' | 'ai-provider' | 'agent-permissions' | 'trading' | 'issues' | 'connectors' | 'mcp' | 'market-data' | 'news-collector' } }
+  | { kind: 'settings';       params: { category: 'general' | 'appearance' | 'activity-bar' | 'ai-provider' | 'agent-runtimes' | 'agent-permissions' | 'tools' | 'trading' | 'issues' | 'harness' | 'connectors' | 'mcp' | 'market-data' | 'news-collector' | 'beta' } }
   | { kind: 'uta-detail';     params: { id: string } }
   | { kind: 'onboarding';     params: Record<string, never> }
   | { kind: 'design-project'; params: { project: string } }
@@ -57,8 +58,10 @@ export type ViewSpec =
         issue?: string
       }
     }
-  | { kind: 'chat-landing';        params: { targetWsId?: string } }
-  | { kind: 'auto-quant-landing';  params: { targetWsId?: string } }
+  | { kind: 'chat-landing';        params: { targetWsId?: string; initialPrompt?: string } }
+  | { kind: 'auto-quant-landing';  params: { targetWsId?: string; initialPrompt?: string } }
+  | { kind: 'auto-prediction-landing'; params: { targetWsId?: string; initialPrompt?: string } }
+  | { kind: 'harness-surface'; params: { wsId: string; capability: 'studio'; source: 'auto-quant' | 'prediction' } }
   | { kind: 'workspace-manager';   params: { sessionId?: string } }
   | {
       kind: 'file-viewer'
@@ -84,10 +87,10 @@ export type ViewKind = ViewSpec['kind']
 export type ActivitySection =
   | 'chat'
   | 'auto-quant'
+  | 'prediction'
   | 'inbox'
   | 'tracked'
   | 'workspaces'
-  | 'trading-as-git'
   | 'connectors'
   | 'settings'
   | 'dev'
@@ -95,7 +98,7 @@ export type ActivitySection =
   | 'portfolio'
   | 'issue'
   | 'automation'
-  | 'news'
+  | 'office'
 
 export interface Tab {
   id: string

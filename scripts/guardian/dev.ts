@@ -26,6 +26,10 @@ import {
   takeoverRequested,
   startGuardianControlServer,
   buildGuardianRuntimeStatus,
+  aliceProjectEnvironment,
+  resolveAliceProjectIdentity,
+  readAliceProjectProduct,
+  RestartBackoff,
   type RuntimeProcessLock,
 } from '../../packages/guardian-runtime/src/index.js'
 import {
@@ -76,6 +80,12 @@ async function main(): Promise<void> {
   const takeover = takeoverRequested()
   const guardianStartedAt = currentProcessStartedAt()
   const guardianInstanceId = randomUUID()
+  const aliceProject = resolveAliceProjectIdentity({
+    home: dataHome,
+    appRoot: process.cwd(),
+    env: process.env,
+    key: process.env['OPENALICE_PROJECT'] ?? 'default',
+  })
 
   try {
     guardianRuntimeLock = await acquireGuardianRuntime({
@@ -96,7 +106,7 @@ async function main(): Promise<void> {
       if (owner) {
         console.error(`[guardian] owner     → ${owner.launcher} pid=${owner.pid} heartbeat=${owner.heartbeatAt}`)
       }
-      console.error('[guardian] keep the existing instance, use `pnpm dev -- --home <path>` for an isolated checkout, or run `pnpm dev --takeover` to replace it')
+      console.error('[guardian] keep the existing AliceProject, use `pnpm dev -- --home <path>` for an isolated project, or run `pnpm dev --takeover` to replace it')
       process.exitCode = 2
       return
     }
@@ -122,12 +132,13 @@ async function main(): Promise<void> {
   }
 
   const initialMode = await resolveGuardianTradingMode(process.env, dataHome)
-  const liteMode = initialMode.mode === 'lite'
+  const projectProduct = await readAliceProjectProduct(dataHome)
+  const skipUta = projectProduct === 'nano' || initialMode.mode === 'lite'
   let connectorEnabled = await readConnectorServiceEnabled(dataHome)
 
   // env (OPENALICE_*_PORT) > data/config/ports.json > default+probe.
   const ports = await planPorts(resolvePortConfig(process.env, await readPortsFile(dataHome)), {
-    skipUta: liteMode,
+    skipUta,
     skipConnector: !connectorEnabled,
   })
   const flagPath = resolve(dataHome, 'data/control/restart-uta.flag')
@@ -136,11 +147,25 @@ async function main(): Promise<void> {
   const connectorUrl = `http://127.0.0.1:${ports.connectorPort}`
   const backendHotReload = isBackendHotReloadEnabled(process.env)
   let aliceStatus = 'starting'
-  let utaStatus = liteMode ? 'disabled' : 'starting'
+  let utaStatus = skipUta ? 'disabled' : 'starting'
   let connectorStatus = connectorEnabled ? 'starting' : 'disabled'
+  let guardianStopping = false
+  let connectorRecoveryReady = false
   let alice: ChildProcess | null = null
   let uta: OptionalServiceController | null = null
   let connector: OptionalServiceController | null = null
+  const connectorRecovery = new RestartBackoff({
+    onScheduled: (delayMs, attempt) => {
+      connectorStatus = 'offline'
+      console.warn(`[guardian] Connector recovery attempt ${attempt} in ${delayMs}ms`)
+    },
+  })
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+    process.once(signal, () => {
+      guardianStopping = true
+      connectorRecovery.stop()
+    })
+  }
   const runtimeVersion = readRuntimeVersion()
   const managedSearchToolsBin = resolve(
     process.cwd(),
@@ -161,8 +186,10 @@ async function main(): Promise<void> {
   console.log('')
   console.log(`[guardian] mode     →  ${initialMode.mode} (${initialMode.source}${initialMode.envLocked ? ', env-locked' : ''})`)
   console.log(`[guardian] data     →  ${dataHome}`)
+  console.log(`[guardian] project  →  ${aliceProject.displayName} (${aliceProject.id})`)
   console.log(`[guardian] app      →  ${process.cwd()}`)
-  console.log(`[guardian] UTA      →  ${liteMode ? 'disabled (trading mode lite)' : utaUrl}`)
+  console.log(`[guardian] product  →  ${projectProduct}`)
+  console.log(`[guardian] UTA      →  ${skipUta ? (projectProduct === 'nano' ? 'disabled (NanoAlice)' : 'disabled (trading mode lite)') : utaUrl}`)
   console.log(`[guardian] Connector→  ${connectorEnabled ? connectorUrl : 'disabled'}`)
   console.log(`[guardian] Alice    →  http://localhost:${ports.webPort}`)
   console.log(`[guardian] Tools    →  http://127.0.0.1:${ports.mcpPort}/cli`)
@@ -179,6 +206,7 @@ async function main(): Promise<void> {
       productVersion: runtimeVersion,
       state: aliceStatus === 'ready' ? 'running' : aliceStatus,
       home: resolve(dataHome),
+      aliceProject,
       owner: {
         surface: 'dev',
         pid: process.pid,
@@ -220,6 +248,7 @@ async function main(): Promise<void> {
 
   const baseEnv = {
     ...process.env,
+    ...aliceProjectEnvironment(aliceProject),
     NODE_OPTIONS: `${process.env['NODE_OPTIONS'] ?? ''} --conditions=openalice-source`.trim(),
     // Children must resolve the same user-data root the Guardian watches —
     // src/core/paths.ts reads OPENALICE_HOME; never rely on cwd inheritance.
@@ -230,6 +259,7 @@ async function main(): Promise<void> {
     OPENALICE_GUARDIAN_STARTED_AT: String(guardianStartedAt),
     ...(managedToolchainPath ? { OPENALICE_MANAGED_TOOLCHAIN_PATH: managedToolchainPath } : {}),
     ...(takeover ? { OPENALICE_TAKEOVER: '1' } : {}),
+    ...(projectProduct === 'nano' ? { OPENALICE_PROJECT_PRODUCT: 'nano', OPENALICE_UTA_DISABLED: '1' } : {}),
   }
 
   // ── UTA spec (re-used by Guardian for restart) ────────────
@@ -252,7 +282,7 @@ async function main(): Promise<void> {
       })
     return new OptionalServiceController(utaSpec, `${utaUrl}/__uta/health`, utaInitial)
   }
-  if (!liteMode) {
+  if (!skipUta) {
     uta = spawnUTAController()
   }
 
@@ -266,13 +296,19 @@ async function main(): Promise<void> {
   const spawnConnectorController = () => {
     connectorStatus = 'starting'
     const initial = spawnChild(connectorSpec)
+    const controller = new OptionalServiceController(connectorSpec, `${connectorUrl}/__connector/health`, initial)
     void waitForHttp(`${connectorUrl}/__connector/health`, { timeoutMs: 15_000 })
       .then((ready) => {
         connectorStatus = ready ? 'ready' : 'offline'
-        if (ready) console.log('[guardian] Connector ready')
-        else console.warn('[guardian] Connector did not become ready within 15s — continuing without external notifications')
+        if (ready) {
+          connectorRecovery.reset()
+          console.log('[guardian] Connector ready')
+        } else {
+          console.warn('[guardian] Connector did not become ready within 15s — continuing without external notifications')
+          if (connectorRecoveryReady) scheduleConnectorRecovery(controller)
+        }
       })
-    return new OptionalServiceController(connectorSpec, `${connectorUrl}/__connector/health`, initial)
+    return controller
   }
   if (connectorEnabled) connector = spawnConnectorController()
 
@@ -344,6 +380,30 @@ async function main(): Promise<void> {
   }
   if (uta) attachServiceCascade(uta)
   if (connector) attachServiceCascade(connector)
+  connectorRecoveryReady = true
+
+  function armConnectorRecovery(controller: OptionalServiceController) {
+    const watched = controller.process
+    watched.once('exit', () => {
+      if (stoppingOrReplaced() || controller.restartInProgress) return
+      scheduleConnectorRecovery(controller)
+    })
+  }
+  function stoppingOrReplaced() { return guardianStopping || connector === null || !connectorEnabled }
+  function scheduleConnectorRecovery(controller: OptionalServiceController) {
+    connectorRecovery.schedule(async () => {
+      if (stoppingOrReplaced() || connector !== controller) return true
+      connectorStatus = 'starting'
+      const ready = await controller.restart()
+      connectorStatus = ready ? 'ready' : 'offline'
+      armConnectorRecovery(controller)
+      return ready
+    })
+  }
+  if (connector) {
+    armConnectorRecovery(connector)
+    if (connectorStatus === 'offline') scheduleConnectorRecovery(connector)
+  }
 
   // Alice applies migrations before becoming ready. Re-read the service flag
   // here so an upgraded legacy Telegram install starts Connector Service on
@@ -354,6 +414,7 @@ async function main(): Promise<void> {
     connector = spawnConnectorController()
     cascade.trackChild(connector.process, { nonCritical: true })
     attachServiceCascade(connector)
+    armConnectorRecovery(connector)
   }
 
   // ── Flag watch ────────────────────────────────────────────
@@ -364,9 +425,10 @@ async function main(): Promise<void> {
     onTrigger: () => {
       void (async () => {
         const mode = await resolveGuardianTradingMode(process.env, dataHome)
-        if (mode.mode === 'lite') {
+        const product = await readAliceProjectProduct(dataHome)
+        if (product === 'nano' || mode.mode === 'lite') {
           if (uta) {
-            console.log('[guardian] trading mode lite — stopping UTA')
+            console.log(`[guardian] ${product === 'nano' ? 'NanoAlice' : 'trading mode lite'} — stopping UTA`)
             cascade.expectExit(uta.process)
             try { uta.process.kill('SIGTERM') } catch { /* noop */ }
             uta = null
@@ -398,6 +460,7 @@ async function main(): Promise<void> {
             try { connector.process.kill('SIGTERM') } catch { /* noop */ }
             connector = null
             connectorStatus = 'disabled'
+            connectorRecovery.reset()
           }
           return
         }
@@ -406,9 +469,14 @@ async function main(): Promise<void> {
           connector = spawnConnectorController()
           cascade.trackChild(connector.process, { nonCritical: true })
           attachServiceCascade(connector)
+          armConnectorRecovery(connector)
           return
         }
-        await connector.restart()
+        connectorRecovery.reset()
+        const ready = await connector.restart()
+        connectorStatus = ready ? 'ready' : 'offline'
+        armConnectorRecovery(connector)
+        if (!ready) scheduleConnectorRecovery(connector)
       })()
     },
   })

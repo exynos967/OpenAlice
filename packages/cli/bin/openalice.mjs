@@ -22,6 +22,18 @@ import { formatServerHelp, parseServerArgs, runServerCommand } from '../src/serv
 import { connectSsh, formatSshHelp, parseSshConnectArgs } from '../src/ssh-connect.mjs'
 import { formatUninstallHelp, runUninstallCommand } from '../src/uninstall.mjs'
 import { formatUpdateHelp, maybeNotifyUpdate, runUpdateCommand } from '../src/update.mjs'
+import {
+  formatCreateAliceProjectHelp,
+  runCreateAliceProjectCommand,
+} from '../src/create-alice-project.ts'
+import {
+  formatProjectHelp,
+  runProjectCommand,
+} from '../src/project-command.ts'
+import {
+  formatMachineHelp,
+  runMachineCommand,
+} from '../src/machine-command.ts'
 
 export async function main(argv = process.argv.slice(2)) {
   const [command, ...args] = argv
@@ -124,6 +136,34 @@ Prints a completion script to stdout without modifying shell configuration.
       return 0
     }
     return runUninstallCommand(args)
+  }
+  if (command === 'create') {
+    const [subject, ...createArgs] = args
+    if (!subject || subject === '--help' || subject === '-h' || createArgs.includes('--help') || createArgs.includes('-h')) {
+      process.stdout.write(formatCreateAliceProjectHelp())
+      return !subject || subject === '--help' || subject === '-h' ? 2 : 0
+    }
+    if (subject !== 'alice-project') {
+      const error = new Error(`Unknown create target: ${subject}\n\n${formatCreateAliceProjectHelp()}`)
+      error.code = 'EUSAGE'
+      error.exitCode = 2
+      throw error
+    }
+    return runCreateAliceProjectCommand(createArgs)
+  }
+  if (command === 'project') {
+    if (args.includes('--help') || args.includes('-h')) {
+      process.stdout.write(formatProjectHelp())
+      return 0
+    }
+    return runProjectCommand(args)
+  }
+  if (command === 'machine') {
+    if (args.includes('--help') || args.includes('-h')) {
+      process.stdout.write(formatMachineHelp())
+      return 0
+    }
+    return runMachineCommand(args)
   }
   const error = new Error(`Unknown command: ${command}\n\n${formatRootHelp()}`)
   error.code = 'EUSAGE'

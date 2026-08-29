@@ -3,7 +3,7 @@ import { formatRelativeTime } from '../../lib/intl'
 import { ArrowUpCircle, Bot, ChevronRight, Code, Cpu, GitBranch, ScrollText, Sparkles, Terminal, type LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { GitLogEntry, Workspace } from './api'
-import { workspaceDisplayName, workspaceDisplayTitle } from './display'
+import { sessionCoworkerLabel, workspaceDisplayName, workspaceDisplayTitle } from './display'
 
 /**
  * Single-workspace card for the Workspaces Overview dashboard. Variant B
@@ -53,6 +53,7 @@ export function OverviewCard({
 }: Props) {
   const { t } = useTranslation()
   const w = workspace
+  const upgradeVersion = w.upgradeAvailable?.to.replace(/^v(?=\d)/, '') ?? ''
   const label = workspaceDisplayName(w)
   const hasRunning = w.sessions.some((s) => s.state === 'running')
   const previewSessions = w.sessions.slice(0, SESSION_PREVIEW_LIMIT)
@@ -106,12 +107,12 @@ export function OverviewCard({
               disabled={!onUpgrade}
               title={t('workspace.templateUpgrade', {
                 from: w.upgradeAvailable.from,
-                to: w.upgradeAvailable.to,
+                to: upgradeVersion,
               })}
-              className="oa-pressable pointer-events-auto flex min-h-10 shrink-0 items-center gap-1 rounded border border-primary/40 px-1.5 py-0.5 text-[10px] font-medium text-primary transition-colors hover:border-primary/80 hover:bg-primary/10 disabled:cursor-default disabled:hover:border-primary/40 disabled:hover:bg-transparent sm:min-h-0"
+              className={`oa-pressable pointer-events-auto flex min-h-10 shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors sm:min-h-0 ${w.upgradeAvailable.verified === false ? 'border border-warning/50 text-warning hover:bg-warning/10' : 'border border-primary/40 text-primary hover:border-primary/80 hover:bg-primary/10'}`}
             >
               <ArrowUpCircle size={10} strokeWidth={2.25} />
-              <span>v{w.upgradeAvailable.to}</span>
+              <span>v{upgradeVersion}</span>
             </button>
           )}
         </div>
@@ -133,14 +134,14 @@ export function OverviewCard({
                 >
                   <button
                     type="button"
-                    aria-label={`${s.name} ${t(s.state === 'running' ? 'workspace.running' : 'workspace.paused')}`}
+                    aria-label={`${sessionCoworkerLabel(s)} ${t(s.state === 'running' ? 'workspace.running' : 'workspace.paused')}`}
                     onClick={() => onOpenSession(s.id)}
                     className="oa-nav-row pointer-events-auto flex min-h-10 w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px] text-foreground hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:min-h-0"
                   >
                     <span className="w-3 flex justify-center text-muted-foreground">
                       <AgentGlyph agent={s.agent} />
                     </span>
-                    <span className="font-mono text-[11px] tabular-nums">{s.name}</span>
+                    <span className="truncate text-[12px]">{sessionCoworkerLabel(s)}</span>
                     <span
                       className={`text-[11px] ${
                         s.state === 'running' ? 'text-success' : 'text-muted-foreground'

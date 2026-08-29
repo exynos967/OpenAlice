@@ -45,7 +45,7 @@ import type {
 export type WorkspaceConversationTarget =
   | { kind: 'resume'; resumeId: string }
   | { kind: 'workspace'; workspaceId: string }
-  | { kind: 'harness'; harness: 'chat' | 'autoquant' }
+  | { kind: 'harness'; harness: 'chat' | 'autoquant' | 'prediction' }
   | { kind: 'inbox'; inboxEntryId: string; workspaceId?: string }
   | {
       kind: 'issue'
@@ -95,12 +95,14 @@ export type WorkspaceConversationResolution =
         | 'missing-session'
         | 'missing-native-session'
         | 'retired-session'
+        | 'deleted-session'
         | 'departed-workspace'
         | 'purged-workspace'
         | 'deleted-workspace'
         | 'missing-workspace'
         | 'chat-workspace-unavailable'
         | 'autoquant-not-initialized'
+        | 'prediction-not-initialized'
       attributedOrigin?: SessionOrigin
       artifact?: ArtifactRef
     }
@@ -243,6 +245,11 @@ export interface WorkspaceToolContext {
   }
   /** Safe current-Workspace template preview/apply surface. */
   templateUpgrades?: WorkspaceTemplateUpgradeControl
+  /** Rename a product Session in this Workspace. Empty/null clears the nametag. */
+  setSessionDisplayName?: (input: {
+    readonly resumeId: string
+    readonly displayName: string | null
+  }) => Promise<{ resumeId: string; displayName?: string }>
 }
 
 // ==================== Factory shape ====================

@@ -64,6 +64,7 @@ function fakeService(opts: {
     dispatchHeadlessTask,
     headlessTasks: { get: () => opts.task ?? null },
     headlessLogsDir: opts.logsDir ?? '/tmp/logs',
+    recordAgentRuntime: vi.fn(async () => undefined),
   } as unknown as WorkspaceService
   return { svc, adapter, workspace, dispatchHeadlessTask, appendProvenance }
 }
@@ -95,6 +96,38 @@ describe('Workspace conversation target resolution', () => {
       mode: 'exact',
       origin,
       artifact: { kind: 'issue', workspaceId: 'ws-peer', issueId: 'audit' },
+    })
+  })
+
+  it('keeps an archived Session as the exact follow-up target', () => {
+    const identity = {
+      ...origin,
+      wsId: origin.workspaceId,
+      agentSessionId: 'native-private',
+      presence: 'archived' as const,
+    }
+    const { svc } = fakeService({ identity, provenance: issueProvenance() })
+    expect(resolveWorkspaceConversationTarget(svc, {
+      kind: 'issue', workspaceId: 'ws-peer', issueId: 'audit',
+    })).toEqual({
+      mode: 'exact',
+      origin,
+      artifact: { kind: 'issue', workspaceId: 'ws-peer', issueId: 'audit' },
+    })
+  })
+
+  it('does not replace a soft-deleted Session with a fresh worker', () => {
+    const identity = {
+      ...origin,
+      wsId: origin.workspaceId,
+      agentSessionId: 'native-private',
+      presence: 'deleted' as const,
+    }
+    const { svc } = fakeService({ identity, provenance: issueProvenance() })
+    expect(resolveWorkspaceConversationTarget(svc, {
+      kind: 'issue', workspaceId: 'ws-peer', issueId: 'audit',
+    })).toMatchObject({
+      mode: 'unavailable', reason: 'deleted-session', attributedOrigin: origin,
     })
   })
 
@@ -179,6 +212,11 @@ describe('Workspace conversation control', () => {
       undefined,
       undefined,
       expect.anything(),
+      {
+        kind: 'conversation',
+        caller: { kind: 'human' },
+        reason: 'harness-chat',
+      },
     )
   })
 
@@ -215,6 +253,56 @@ describe('Workspace conversation control', () => {
       resolution: { reason: 'autoquant-not-initialized' },
     })
     expect(dispatchHeadlessTask).not.toHaveBeenCalled()
+    expect(svc.recordAgentRuntime).toHaveBeenCalledWith('runtime.rejected', expect.objectContaining({
+      reason: 'autoquant-not-initialized',
+    }))
+  })
+
+  it('creates a fresh Session only in the initialized default Auto Prediction Workspace', async () => {
+    const { svc, workspace, dispatchHeadlessTask } = fakeService({ workspaceTemplate: 'auto-prediction' })
+    await expect(createWorkspaceConversationControl(svc, {
+      readQuickChatPreferences: vi.fn(async () => ({ recentChatWorkspaceId: null })),
+      rememberRecentChatWorkspace: vi.fn(async () => undefined),
+      readAutoQuantPreferences: vi.fn(async () => ({ defaultWorkspaceId: null })),
+      readAutoPredictionPreferences: vi.fn(async () => ({ defaultWorkspaceId: workspace.id })),
+    }).ask({
+      target: { kind: 'harness', harness: 'prediction' },
+      prompt: 'Evaluate this prediction market.',
+      timeoutMs: 300_000,
+    })).resolves.toMatchObject({
+      status: 'dispatched',
+      workspaceId: workspace.id,
+      resolution: { mode: 'reconstructed', reason: 'harness-default' },
+    })
+    expect(dispatchHeadlessTask).toHaveBeenCalledWith(
+      workspace,
+      expect.anything(),
+      'Evaluate this prediction market.',
+      300_000,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      expect.anything(),
+      expect.objectContaining({ reason: 'harness-prediction' }),
+    )
+  })
+
+  it('does not create an Auto Prediction Workspace when the Harness is not initialized', async () => {
+    const { svc, dispatchHeadlessTask } = fakeService()
+    await expect(createWorkspaceConversationControl(svc, {
+      readQuickChatPreferences: vi.fn(async () => ({ recentChatWorkspaceId: null })),
+      rememberRecentChatWorkspace: vi.fn(async () => undefined),
+      readAutoQuantPreferences: vi.fn(async () => ({ defaultWorkspaceId: null })),
+      readAutoPredictionPreferences: vi.fn(async () => ({ defaultWorkspaceId: null })),
+    }).ask({
+      target: { kind: 'harness', harness: 'prediction' },
+      prompt: 'Evaluate this prediction market.',
+    })).resolves.toMatchObject({
+      status: 'unavailable',
+      resolution: { reason: 'prediction-not-initialized' },
+    })
+    expect(dispatchHeadlessTask).not.toHaveBeenCalled()
   })
 
   it('continues the exact Session behind Issue provenance', async () => {
@@ -247,6 +335,7 @@ describe('Workspace conversation control', () => {
         deliveredPrompt: 'Why did you create this?',
         promptMode: 'plain',
       }),
+      undefined,
     )
   })
 
@@ -269,6 +358,11 @@ describe('Workspace conversation control', () => {
       promptMode: 'plain',
       originalPrompt: 'Why did the report reach this conclusion?',
       deliveredPrompt: 'Why did the report reach this conclusion?',
+    })
+    expect((dispatchHeadlessTask.mock.calls as unknown[][])[0]?.[9]).toEqual({
+      kind: 'conversation',
+      caller: { kind: 'human' },
+      reason: 'missing-origin',
     })
     expect(appendProvenance).toHaveBeenCalledWith(expect.objectContaining({
       action: 'reconstructed',

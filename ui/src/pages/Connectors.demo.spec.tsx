@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   load: vi.fn(),
   save: vi.fn(),
   test: vi.fn(),
+  reconnect: vi.fn(),
+  deskLoad: vi.fn(),
   openOrFocus: vi.fn(),
 }))
 
@@ -25,6 +27,13 @@ vi.mock('../api', async (importOriginal) => {
         load: mocks.load,
         save: mocks.save,
         test: mocks.test,
+        reconnect: mocks.reconnect,
+        desk: {
+          load: mocks.deskLoad,
+          create: vi.fn(),
+          update: vi.fn(),
+          disable: vi.fn(),
+        },
       },
     },
   }
@@ -35,12 +44,20 @@ vi.mock('../tabs/store', () => ({
     selector({ openOrFocus: mocks.openOrFocus }),
 }))
 
+vi.mock('../contexts/workspaces-context', () => ({
+  useWorkspaces: () => ({
+    workspaces: [{ id: 'ws-1', tag: 'desk', displayName: 'Desk' }],
+  }),
+}))
+
 beforeEach(async () => {
   vi.clearAllMocks()
   await i18n.changeLanguage('en')
   mocks.load.mockImplementation(async () => createDemoConnectorSnapshot())
   mocks.save.mockImplementation(async (config) => ({ config: redactSecrets(config) }))
   mocks.test.mockResolvedValue({ ok: true, probeId: 'connector-probe-demo' })
+  mocks.reconnect.mockResolvedValue({ ok: true, scope: 'adapter', adapterId: 'telegram' })
+  mocks.deskLoad.mockResolvedValue({ desk: null })
 })
 
 afterEach(() => cleanup())
@@ -55,6 +72,31 @@ describe('Connector demo routes', () => {
     expect(screen.getByText(/External delivery is disabled/)).toBeTruthy()
   })
 
+  it('reconnects an unhealthy configured adapter from the operations route', async () => {
+    const snapshot = createDemoConnectorSnapshot()
+    snapshot.config.serviceEnabled = true
+    snapshot.config.adapters.telegram = {
+      enabled: true,
+      settings: {},
+      configuredSecrets: ['botToken'],
+    }
+    snapshot.health = {
+      enabled: true,
+      status: 'degraded',
+      service: {
+        status: 'degraded',
+        startedAt: '2026-08-23T00:00:00.000Z',
+        adapters: [{ id: 'telegram', enabled: true, status: 'degraded', lastError: 'offline' }],
+      },
+    }
+    mocks.load.mockResolvedValue(snapshot)
+
+    render(<ConnectorStatusPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Reconnect' }))
+
+    await waitFor(() => expect(mocks.reconnect).toHaveBeenCalledWith('telegram'))
+  })
+
   it('localizes the read-only operations route', async () => {
     await i18n.changeLanguage('zh')
     render(<ConnectorStatusPage />)
@@ -65,7 +107,7 @@ describe('Connector demo routes', () => {
     expect(screen.getByRole('heading', { name: '连接器服务' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: '投递连接器' })).toBeTruthy()
     expect(screen.getByText('将收件箱通知投递到你的私有 Discord 会话。')).toBeTruthy()
-    expect(screen.getAllByText('需要设置')).toHaveLength(2)
+    expect(screen.getAllByText('需要设置')).toHaveLength(4)
     expect(screen.queryByText('Delivery connectors')).toBeNull()
   })
 
@@ -75,8 +117,10 @@ describe('Connector demo routes', () => {
     expect(await screen.findByText('Run external notification connectors')).toBeTruthy()
     expect(screen.getByText('Discord')).toBeTruthy()
     expect(screen.getByText('Telegram')).toBeTruthy()
+    expect(screen.getByText('Slack')).toBeTruthy()
+    expect(screen.getByText('Feishu')).toBeTruthy()
     expect(screen.getByText('Application ID')).toBeTruthy()
-    expect(screen.getAllByText('Bot token')).toHaveLength(2)
+    expect(screen.getAllByText('Bot token')).toHaveLength(3)
     expect(screen.queryByRole('button', { name: 'Send test' })).toBeNull()
   })
 
@@ -89,7 +133,7 @@ describe('Connector demo routes', () => {
 
     expect(await screen.findByRole('heading', { name: '连接器' })).toBeTruthy()
     expect(screen.getByText('运行外部通知连接器')).toBeTruthy()
-    expect(screen.getByText('需要凭据')).toBeTruthy()
+    expect(screen.getAllByText('需要凭据')).toHaveLength(3)
     expect(screen.getByRole('textbox', { name: 'Discord 应用 ID' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '管理 Telegram 连接信息' })).toBeTruthy()
     expect(screen.queryByText('Connection details')).toBeNull()
@@ -136,7 +180,52 @@ describe('Connector demo routes', () => {
     expect(await screen.findByText('connector-probe-demo')).toBeTruthy()
   })
 
-  it('keeps a secret as a local draft until the user saves it explicitly', async () => {
+  it('confirms before unlinking a learned owner and keeps the token', async () => {
+    const snapshot = createDemoConnectorSnapshot()
+    snapshot.config.serviceEnabled = true
+    snapshot.config.adapters.discord = {
+      enabled: true,
+      settings: { applicationId: 'discord-app', ownerUserId: 'owner-1' },
+      configuredSecrets: ['botToken'],
+    }
+    snapshot.health = {
+      enabled: true,
+      status: 'healthy',
+      service: {
+        status: 'healthy',
+        startedAt: '2026-07-31T00:00:00.000Z',
+        adapters: [{
+          id: 'discord',
+          enabled: true,
+          status: 'healthy',
+          owner: 'owner-1',
+        }],
+      },
+    }
+    mocks.load.mockResolvedValue(snapshot)
+    render(<ConnectorsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Unlink' }))
+    expect(screen.getByRole('heading', { name: 'Unlink Discord?' })).toBeTruthy()
+    await new Promise((resolve) => window.setTimeout(resolve, 800))
+    expect(mocks.save).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('heading', { name: 'Unlink Discord?' })).toBeNull()
+    await new Promise((resolve) => window.setTimeout(resolve, 800))
+    expect(mocks.save).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unlink' }))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Unlink' }).at(-1)!)
+
+    await waitFor(() => expect(mocks.save).toHaveBeenCalled(), { timeout: 1_200 })
+    const saved = mocks.save.mock.calls.at(-1)?.[0] as PublicConnectorConfig
+    expect(saved.adapters.discord.settings.ownerUserId).toBe('')
+    expect(saved.adapters.discord.settings.applicationId).toBe('discord-app')
+    expect(saved.adapters.discord.configuredSecrets).toEqual(['botToken'])
+  })
+
+  it('keeps a secret as a local draft until the user saves a plausible token', async () => {
     render(<ConnectorsPage />)
 
     await screen.findByText('Run external notification connectors')
@@ -148,13 +237,23 @@ describe('Connector demo routes', () => {
     expect(mocks.save).not.toHaveBeenCalled()
     expect(input.value).toBe('a')
 
-    fireEvent.change(input, { target: { value: 'ab' } })
-    expect(input.value).toBe('ab')
+    fireEvent.change(input, { target: { value: 'qweqw' } })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Save token' })[0])
+    expect((await screen.findByRole('alert')).textContent).toContain('too short to be a bot token')
+    expect(mocks.save).not.toHaveBeenCalled()
+
+    expect(input.type).toBe('password')
+    fireEvent.click(screen.getAllByRole('button', { name: 'Show draft' })[0])
+    expect(input.type).toBe('text')
+    fireEvent.click(screen.getAllByRole('button', { name: 'Hide draft' })[0])
+    expect(input.type).toBe('password')
+
+    fireEvent.change(input, { target: { value: '123456789:AAHplausible-bot-token' } })
     fireEvent.click(screen.getAllByRole('button', { name: 'Save token' })[0])
 
     await waitFor(() => expect(mocks.save).toHaveBeenCalled())
     const saved = mocks.save.mock.calls.at(-1)?.[0] as PublicConnectorConfig
-    expect(saved.adapters.discord.settings.botToken).toBe('ab')
+    expect(saved.adapters.discord.settings.botToken).toBe('123456789:AAHplausible-bot-token')
     await waitFor(() => expect(input.value).toBe(''))
     expect(input.placeholder).toBe('Configured — enter a new value to replace')
     expect((screen.getAllByRole('button', { name: 'Replace token' })[0] as HTMLButtonElement).disabled).toBe(true)
@@ -166,13 +265,67 @@ describe('Connector demo routes', () => {
 
     await screen.findByText('Run external notification connectors')
     const input = screen.getAllByPlaceholderText('Stored locally and sealed')[0] as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'still-here' } })
+    fireEvent.change(input, { target: { value: '123456789:AAHstill-here-bot-token' } })
     fireEvent.click(screen.getAllByRole('button', { name: 'Save token' })[0])
 
     expect((await screen.findByRole('alert')).textContent).toContain(
       'Token was not saved: Connector settings unavailable',
     )
-    expect(input.value).toBe('still-here')
+    expect(input.value).toBe('123456789:AAHstill-here-bot-token')
+  })
+
+  it('confirms before replacing a configured secret and omits secrets from unlink auto-save', async () => {
+    const snapshot = createDemoConnectorSnapshot()
+    snapshot.config.serviceEnabled = true
+    snapshot.config.adapters.discord = {
+      enabled: true,
+      settings: { applicationId: 'discord-app', ownerUserId: 'owner-1' },
+      configuredSecrets: ['botToken'],
+    }
+    snapshot.health = {
+      enabled: true,
+      status: 'healthy',
+      service: {
+        status: 'healthy',
+        startedAt: '2026-07-31T00:00:00.000Z',
+        adapters: [{
+          id: 'discord',
+          enabled: true,
+          status: 'healthy',
+          owner: 'owner-1',
+        }],
+      },
+    }
+    mocks.load.mockResolvedValue(snapshot)
+    render(<ConnectorsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage Discord connection details' }))
+    const input = screen.getByLabelText('Discord Bot token') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '123456789:AAHreplacement-bot-token' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Replace token' }))
+    expect(screen.getByRole('heading', { name: 'Replace Discord token?' })).toBeTruthy()
+    expect(mocks.save).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Replace token' }).at(-1)!)
+    await waitFor(() => expect(mocks.save).toHaveBeenCalled())
+    expect(mocks.save.mock.calls.at(-1)?.[0].adapters.discord.settings.botToken)
+      .toBe('123456789:AAHreplacement-bot-token')
+  })
+
+  it('rejects a short replacement draft before asking for confirmation', async () => {
+    const snapshot = createDemoConnectorSnapshot()
+    snapshot.config.adapters.discord.configuredSecrets = ['botToken']
+    mocks.load.mockResolvedValue(snapshot)
+    render(<ConnectorsPage />)
+
+    await screen.findByText('Run external notification connectors')
+    const input = screen.getByLabelText('Discord Bot token') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'qweqw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Replace token' }))
+
+    expect((await screen.findByRole('alert')).textContent).toContain('too short to be a bot token')
+    expect(screen.queryByRole('heading', { name: 'Replace Discord token?' })).toBeNull()
+    expect(mocks.save).not.toHaveBeenCalled()
   })
 
   it('requires confirmation before removing a configured secret', async () => {
@@ -209,7 +362,7 @@ function redactSecrets(config: PublicConnectorConfig): PublicConnectorConfig {
   return {
     ...config,
     adapters: Object.fromEntries(Object.entries(config.adapters).map(([id, adapter]) => {
-      const secretKeys = id === 'discord' || id === 'telegram' ? ['botToken'] : []
+      const secretKeys = id === 'slack' ? ['botToken', 'appToken'] : id === 'discord' || id === 'telegram' ? ['botToken'] : []
       const configuredSecrets = new Set(adapter.configuredSecrets)
       const settings = { ...adapter.settings }
       for (const key of secretKeys) {

@@ -1,4 +1,4 @@
-import type { ComponentType } from 'react'
+import type { ComponentType, ReactNode } from 'react'
 import type { Workspace } from '../components/workspace/api'
 import type { ViewKind, ViewSpec } from './types'
 
@@ -6,17 +6,22 @@ import { PortfolioPage } from '../pages/PortfolioPage'
 import { TradingAsGitPage } from '../pages/TradingAsGitPage'
 import { IssuePage } from '../pages/IssuePage'
 import { IssueSettingsPage } from '../pages/IssueSettingsPage'
+import { HarnessSettingsPage } from '../pages/HarnessSettingsPage'
 import { IssueDetailPage } from '../pages/IssueDetailPage'
 import { TrackedIssueDetailPage } from '../pages/TrackedIssueDetailPage'
 import { AutomationPage } from '../pages/AutomationPage'
+import { OfficePage } from '../pages/OfficePage'
 import { NewsPage } from '../pages/NewsPage'
 import { MarketPage } from '../pages/MarketPage'
 import { MarketRotationPage } from '../pages/MarketRotationPage'
 import { MarketBoardPage } from '../pages/MarketBoardPage'
 import { MARKET_BOARD_TITLES } from '../pages/market-board-titles'
 import { MarketDetailPage } from '../pages/MarketDetailPage'
-import { SettingsPage } from '../pages/SettingsPage'
+import { AppearanceSettingsPage, SettingsPage, ToolsSettingsPage } from '../pages/SettingsPage'
+import { ActivityBarSettingsPage } from '../pages/ActivityBarSettingsPage'
+import { BetaSettingsPage } from '../pages/BetaSettingsPage'
 import { AgentPermissionsPage } from '../pages/AgentPermissionsPage'
+import { AgentRuntimesSettingsPage } from '../pages/AgentRuntimesSettingsPage'
 import { AIProviderPage } from '../pages/AIProviderPage'
 import { TradingPage } from '../pages/TradingPage'
 import { MCPPage } from '../pages/MCPPage'
@@ -31,7 +36,7 @@ import { DevPage } from '../pages/DevPage'
 import { InboxPage } from '../pages/InboxPage'
 import { InboxPageShell } from '../pages/InboxPageShell'
 import { TrackedPage } from '../pages/TrackedPage'
-import { AutoQuantLandingPage, ChatLandingPage } from '../pages/ChatLandingPage'
+import { AutoPredictionLandingPage, AutoQuantLandingPage, ChatLandingPage } from '../pages/ChatLandingPage'
 import { WorkspaceManagerPage } from '../pages/WorkspaceManagerPage'
 import { PageSidebarShell } from '../pages/PageSidebarShell'
 import { WorkspaceListPage } from '../pages/WorkspaceListPage'
@@ -39,6 +44,7 @@ import { WorkspacePage } from '../pages/WorkspacePage'
 import { TemplateCatalogPage } from '../pages/TemplateCatalogPage'
 import { TemplateDetailPage } from '../pages/TemplateDetailPage'
 import { FileViewerPage } from '../pages/FileViewerPage'
+import { HarnessSurfacePage } from '../pages/HarnessSurfacePage'
 import { TrackedSidebar } from '../components/TrackedSidebar'
 import { WorkspacesSidebar } from '../components/workspace/WorkspacesSidebar'
 import { SettingsCategoryList } from '../components/SettingsCategoryList'
@@ -69,7 +75,7 @@ interface ViewProps<K extends ViewKind> {
 }
 
 export type ViewLifecycle = 'active-only' | 'keep-mounted'
-export type ViewShell = 'chat' | 'auto-quant'
+export type ViewShell = 'chat' | 'auto-quant' | 'prediction'
 
 export interface ViewModule<K extends ViewKind> {
   kind: K
@@ -99,19 +105,27 @@ export interface ViewModule<K extends ViewKind> {
 
 // ==================== Per-kind modules ====================
 
+function TradingArea({ children }: { children: ReactNode }) {
+  return (
+    <PageSidebarShell
+      storageKey="portfolio"
+      titleKey="nav.item.trading"
+      defaultWidth={220}
+      sidebar={<PortfolioSidebar />}
+    >
+      {children}
+    </PageSidebarShell>
+  )
+}
+
 const portfolioModule: ViewModule<'portfolio'> = {
   kind: 'portfolio',
   title: () => 'Portfolio',
   toUrl: () => '/portfolio',
   Component: () => (
-    <PageSidebarShell
-      storageKey="portfolio"
-      titleKey="nav.item.portfolio"
-      defaultWidth={220}
-      sidebar={<PortfolioSidebar />}
-    >
+    <TradingArea>
       <PortfolioPage />
-    </PageSidebarShell>
+    </TradingArea>
   ),
 }
 
@@ -119,7 +133,11 @@ const tradingAsGitModule: ViewModule<'trading-as-git'> = {
   kind: 'trading-as-git',
   title: () => 'Trading as Git',
   toUrl: () => '/trading-as-git',
-  Component: () => <TradingAsGitPage />,
+  Component: () => (
+    <TradingArea>
+      <TradingAsGitPage />
+    </TradingArea>
+  ),
 }
 
 const connectorsModule: ViewModule<'connectors'> = {
@@ -185,11 +203,35 @@ const automationModule: ViewModule<'automation'> = {
   ),
 }
 
+const officeModule: ViewModule<'office'> = {
+  kind: 'office',
+  title: () => 'Office',
+  toUrl: () => '/office',
+  Component: () => <OfficePage />,
+}
+
+function MarketArea({ children }: { children: ReactNode }) {
+  return (
+    <PageSidebarShell
+      storageKey="market"
+      titleKey="nav.item.market"
+      defaultWidth={300}
+      sidebar={<MarketSidebar />}
+    >
+      {children}
+    </PageSidebarShell>
+  )
+}
+
 const newsModule: ViewModule<'news'> = {
   kind: 'news',
   title: () => 'News',
-  toUrl: () => '/news',
-  Component: () => <NewsPage />,
+  toUrl: () => '/market/news',
+  Component: () => (
+    <MarketArea>
+      <NewsPage />
+    </MarketArea>
+  ),
 }
 
 const marketListModule: ViewModule<'market-list'> = {
@@ -197,14 +239,9 @@ const marketListModule: ViewModule<'market-list'> = {
   title: () => 'Market',
   toUrl: () => '/market',
   Component: () => (
-    <PageSidebarShell
-      storageKey="market"
-      titleKey="nav.item.market"
-      defaultWidth={300}
-      sidebar={<MarketSidebar />}
-    >
+    <MarketArea>
       <MarketPage />
-    </PageSidebarShell>
+    </MarketArea>
   ),
 }
 
@@ -213,14 +250,9 @@ const marketRotationModule: ViewModule<'market-rotation'> = {
   title: () => 'Sector Rotation',
   toUrl: () => '/market/rotation',
   Component: () => (
-    <PageSidebarShell
-      storageKey="market"
-      titleKey="nav.item.market"
-      defaultWidth={300}
-      sidebar={<MarketSidebar />}
-    >
+    <MarketArea>
       <MarketRotationPage />
-    </PageSidebarShell>
+    </MarketArea>
   ),
 }
 
@@ -229,14 +261,9 @@ const marketBoardModule: ViewModule<'market-board'> = {
   title: (spec) => MARKET_BOARD_TITLES[spec.params.board],
   toUrl: (spec) => `/market/boards/${spec.params.board}`,
   Component: (props) => (
-    <PageSidebarShell
-      storageKey="market"
-      titleKey="nav.item.market"
-      defaultWidth={300}
-      sidebar={<MarketSidebar />}
-    >
+    <MarketArea>
       <MarketBoardPage {...props} />
-    </PageSidebarShell>
+    </MarketArea>
   ),
 }
 
@@ -247,14 +274,9 @@ const marketDetailModule: ViewModule<'market-detail'> = {
     `/market/${spec.params.assetClass}/${encodeURIComponent(spec.params.symbol)}` +
     (spec.params.source ? `?source=${encodeURIComponent(spec.params.source)}` : ''),
   Component: (props) => (
-    <PageSidebarShell
-      storageKey="market"
-      titleKey="nav.item.market"
-      defaultWidth={300}
-      sidebar={<MarketSidebar />}
-    >
+    <MarketArea>
       <MarketDetailPage {...props} />
-    </PageSidebarShell>
+    </MarketArea>
   ),
 }
 
@@ -263,27 +285,39 @@ const settingsCategoryTitle: Record<
   string
 > = {
   general: 'Settings',
+  appearance: 'Appearance',
+  'activity-bar': 'Activity bar',
   'ai-provider': 'AI Provider',
+  'agent-runtimes': 'Agent runtimes',
   'agent-permissions': 'Agent Permissions',
+  tools: 'Tools',
   trading: 'Trading',
   issues: 'Issues',
+  harness: 'Harness',
   connectors: 'Connectors',
   mcp: 'MCP Server',
   'market-data': 'Market Data',
   'news-collector': 'News Sources',
+  beta: 'Beta',
 }
 
 function SettingsRouter({ spec }: ViewProps<'settings'>) {
   switch (spec.params.category) {
     case 'general': return <SettingsPage />
+    case 'appearance': return <AppearanceSettingsPage />
+    case 'activity-bar': return <ActivityBarSettingsPage />
     case 'ai-provider': return <AIProviderPage />
+    case 'agent-runtimes': return <AgentRuntimesSettingsPage />
     case 'agent-permissions': return <AgentPermissionsPage />
+    case 'tools': return <ToolsSettingsPage />
     case 'trading': return <TradingPage />
     case 'issues': return <IssueSettingsPage />
+    case 'harness': return <HarnessSettingsPage />
     case 'connectors': return <ConnectorsPage />
     case 'mcp': return <MCPPage />
     case 'market-data': return <MarketDataPage />
     case 'news-collector': return <NewsCollectorPage />
+    case 'beta': return <BetaSettingsPage />
   }
 }
 
@@ -312,14 +346,9 @@ const utaDetailModule: ViewModule<'uta-detail'> = {
   title: (spec) => `Account ${spec.params.id}`,
   toUrl: (spec) => `/settings/uta/${encodeURIComponent(spec.params.id)}`,
   Component: (props) => (
-    <PageSidebarShell
-      storageKey="portfolio"
-      titleKey="nav.item.portfolio"
-      defaultWidth={220}
-      sidebar={<PortfolioSidebar />}
-    >
+    <TradingArea>
       <UTADetailPage {...props} />
-    </PageSidebarShell>
+    </TradingArea>
   ),
 }
 
@@ -338,6 +367,7 @@ const designProjectModule: ViewModule<'design-project'> = {
 }
 
 const devTabTitle: Record<Extract<ViewSpec, { kind: 'dev' }>['params']['tab'], string> = {
+  frontend: 'Frontend',
   tools: 'Tools',
   onboarding: 'Onboarding',
   snapshots: 'Snapshots',
@@ -423,6 +453,29 @@ const autoQuantLandingModule: ViewModule<'auto-quant-landing'> = {
   Component: ({ spec }) => <AutoQuantLandingPage spec={spec} />,
 }
 
+const autoPredictionLandingModule: ViewModule<'auto-prediction-landing'> = {
+  kind: 'auto-prediction-landing',
+  shell: 'prediction',
+  title: (spec, ctx) => {
+    if (!spec.params.targetWsId) return 'Auto Prediction'
+    const tag = ctx.workspaces?.find((w) => w.id === spec.params.targetWsId)?.tag
+    return tag ? `New research · ${tag}` : 'New research'
+  },
+  toUrl: () => '/prediction',
+  Component: ({ spec }) => <AutoPredictionLandingPage spec={spec} />,
+}
+
+const harnessSurfaceModule: ViewModule<'harness-surface'> = {
+  kind: 'harness-surface',
+  shell: (spec) => spec.params.source,
+  title: (spec, ctx) => {
+    const tag = ctx.workspaces?.find((workspace) => workspace.id === spec.params.wsId)?.tag
+    return `${tag ?? spec.params.wsId.slice(0, 8)} · Studio`
+  },
+  toUrl: (spec) => `/${spec.params.source}/workspaces/${encodeURIComponent(spec.params.wsId)}/studio`,
+  Component: ({ spec }) => <HarnessSurfacePage workspaceId={spec.params.wsId} source={spec.params.source} />,
+}
+
 const workspaceManagerModule: ViewModule<'workspace-manager'> = {
   kind: 'workspace-manager',
   shell: 'chat',
@@ -453,7 +506,9 @@ const workspaceModule: ViewModule<'workspace'> = {
   kind: 'workspace',
   shell: (spec) => spec.params.source === 'chat'
     ? 'chat'
-    : spec.params.source === 'auto-quant' ? 'auto-quant' : null,
+    : spec.params.source === 'auto-quant'
+      ? 'auto-quant'
+      : spec.params.source === 'prediction' ? 'prediction' : null,
   title: (spec, ctx) => {
     const ws = ctx.workspaces?.find((w) => w.id === spec.params.wsId)
     const tag = ws?.tag ?? spec.params.wsId.slice(0, 8)
@@ -469,12 +524,16 @@ const workspaceModule: ViewModule<'workspace'> = {
         ? `/chat/workspaces/${encodeURIComponent(spec.params.wsId)}`
         : spec.params.source === 'auto-quant'
           ? `/auto-quant/workspaces/${encodeURIComponent(spec.params.wsId)}`
-        : `/workspaces/${encodeURIComponent(spec.params.wsId)}`
+          : spec.params.source === 'prediction'
+            ? `/prediction/workspaces/${encodeURIComponent(spec.params.wsId)}`
+            : `/workspaces/${encodeURIComponent(spec.params.wsId)}`
     const sid = spec.params.sessionId
     return sid ? `${base}/s/${encodeURIComponent(sid)}` : base
   },
   Component: (props) =>
-    props.spec.params.source === 'chat' || props.spec.params.source === 'auto-quant'
+    props.spec.params.source === 'chat'
+      || props.spec.params.source === 'auto-quant'
+      || props.spec.params.source === 'prediction'
       ? <WorkspacePage {...props} />
       : (
         <PageSidebarShell
@@ -524,7 +583,9 @@ const fileViewerModule: ViewModule<'file-viewer'> = {
   kind: 'file-viewer',
   shell: (spec) => spec.params.source === 'chat'
     ? 'chat'
-    : spec.params.source === 'auto-quant' ? 'auto-quant' : null,
+    : spec.params.source === 'auto-quant'
+      ? 'auto-quant'
+      : spec.params.source === 'prediction' ? 'prediction' : null,
   // Tab title = file basename; path itself shows in the page header.
   title: (spec) => spec.params.path.split('/').filter(Boolean).pop() ?? spec.params.path,
   toUrl: (spec) => {
@@ -538,13 +599,17 @@ const fileViewerModule: ViewModule<'file-viewer'> = {
       ? `/chat/workspaces/${encodeURIComponent(spec.params.wsId)}`
       : spec.params.source === 'auto-quant'
         ? `/auto-quant/workspaces/${encodeURIComponent(spec.params.wsId)}`
-      : `/workspaces/${encodeURIComponent(spec.params.wsId)}`
+        : spec.params.source === 'prediction'
+          ? `/prediction/workspaces/${encodeURIComponent(spec.params.wsId)}`
+          : `/workspaces/${encodeURIComponent(spec.params.wsId)}`
     const query = spec.params.returnSessionId
       ? `?sessionId=${encodeURIComponent(spec.params.returnSessionId)}`
       : ''
     return `${base}/view/${encodeURIComponent(spec.params.path)}${query}`
   },
-  Component: ({ spec }) => spec.params.source === 'chat' || spec.params.source === 'auto-quant'
+  Component: ({ spec }) => spec.params.source === 'chat'
+    || spec.params.source === 'auto-quant'
+    || spec.params.source === 'prediction'
     ? <FileViewerPage spec={spec} />
     : spec.params.source === 'tracked'
       ? (
@@ -579,6 +644,7 @@ const VIEWS = {
   'issue-detail': issueDetailModule,
   'tracked-issue-detail': trackedIssueDetailModule,
   automation: automationModule,
+  office: officeModule,
   news: newsModule,
   'market-list': marketListModule,
   'market-rotation': marketRotationModule,
@@ -593,6 +659,8 @@ const VIEWS = {
   tracked: trackedModule,
   'chat-landing': chatLandingModule,
   'auto-quant-landing': autoQuantLandingModule,
+  'auto-prediction-landing': autoPredictionLandingModule,
+  'harness-surface': harnessSurfaceModule,
   'workspace-manager': workspaceManagerModule,
   'workspace-list': workspaceListModule,
   workspace: workspaceModule,

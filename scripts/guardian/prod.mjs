@@ -36,7 +36,11 @@ import {
   startGuardianControlServer,
   currentProcessStartedAt,
   buildGuardianRuntimeStatus,
+  aliceProjectEnvironment,
+  resolveAliceProjectIdentity,
+  readAliceProjectProduct,
   normalizeProcessExitCode,
+  RestartBackoff,
   takeoverRequested,
 } from '@traderalice/guardian-runtime'
 import {
@@ -61,6 +65,13 @@ const RUNTIME_PROVIDER = resolveRuntimeProvider()
 const RUNTIME_CONTENT_IDENTITY = normalizeContentIdentity(
   process.env.OPENALICE_RUNTIME_CONTENT_IDENTITY,
 )
+const ALICE_PROJECT = resolveAliceProjectIdentity({
+  home: DATA_HOME,
+  appRoot: process.env.OPENALICE_APP_HOME ?? process.cwd(),
+  env: process.env,
+  key: process.env.OPENALICE_PROJECT ?? 'default',
+})
+const ALICE_PROJECT_ENV = aliceProjectEnvironment(ALICE_PROJECT)
 if (!process.env.OPENALICE_HOME && process.env.OPENALICE_USER_DATA_HOME) {
   console.warn('[guardian/prod] OPENALICE_USER_DATA_HOME is deprecated — set OPENALICE_HOME instead')
 }
@@ -161,8 +172,9 @@ async function resolveTradingMode(env, userDataHome) {
 const portsFile = await readProdPortsFile(DATA_HOME)
 const portConfig = resolveProdPortConfig(process.env, portsFile)
 let TRADING_MODE = await resolveTradingMode(process.env, DATA_HOME)
-const LITE_MODE = TRADING_MODE.mode === 'lite'
-const plannedPorts = await planProdPorts(portConfig, { skipUta: LITE_MODE })
+const PROJECT_PRODUCT = await readAliceProjectProduct(DATA_HOME)
+const SKIP_UTA = PROJECT_PRODUCT === 'nano' || TRADING_MODE.mode === 'lite'
+const plannedPorts = await planProdPorts(portConfig, { skipUta: SKIP_UTA })
 const WEB_PORT = plannedPorts.web
 const MCP_PORT = plannedPorts.mcp
 const UTA_PORT = plannedPorts.uta
@@ -181,14 +193,22 @@ let restartingConnector = false
 let guardianRuntimeLock = null
 let guardianControlServer = null
 let aliceStatus = 'starting'
-let utaStatus = LITE_MODE ? 'disabled' : 'starting'
+let utaStatus = SKIP_UTA ? 'disabled' : 'starting'
 let connectorStatus = 'disabled'
+const connectorRecovery = new RestartBackoff({
+  onScheduled: (delayMs, attempt) => {
+    connectorStatus = 'offline'
+    console.warn(`[guardian/prod] Connector recovery attempt ${attempt} in ${delayMs}ms`)
+  },
+})
 const RUNTIME_VERSION = await readRuntimeVersion()
 
 console.log('[guardian/prod] starting')
 console.log(`[guardian/prod] mode  → ${TRADING_MODE.mode} (${TRADING_MODE.source}${TRADING_MODE.envLocked ? ', env-locked' : ''})`)
 console.log(`[guardian/prod] data  → ${DATA_HOME}`)
-console.log(`[guardian/prod] UTA   → ${LITE_MODE ? 'disabled (trading mode lite)' : UTA_URL}`)
+console.log(`[guardian/prod] project → ${ALICE_PROJECT.displayName} (${ALICE_PROJECT.id})`)
+console.log(`[guardian/prod] product → ${PROJECT_PRODUCT}`)
+console.log(`[guardian/prod] UTA   → ${SKIP_UTA ? (PROJECT_PRODUCT === 'nano' ? 'disabled (NanoAlice)' : 'disabled (trading mode lite)') : UTA_URL}`)
 console.log(`[guardian/prod] Connector → ${CONNECTOR_URL} (optional)`)
 console.log(`[guardian/prod] Alice → http://${BIND_HOST}:${WEB_PORT}`)
 console.log(`[guardian/prod] Tools → http://127.0.0.1:${MCP_PORT}/cli`)
@@ -212,6 +232,7 @@ function runtimeStatus() {
     runtimeVersion: RUNTIME_VERSION,
     state: stopping ? 'stopping' : aliceStatus === 'ready' ? 'running' : 'starting',
     home: resolve(DATA_HOME),
+    aliceProject: ALICE_PROJECT,
     owner: {
       surface: LAUNCHER,
       pid: process.pid,
@@ -275,6 +296,7 @@ function makeUTASpec() {
     args: ['services/uta/dist/uta.js'],
     env: {
       ...process.env,
+      ...ALICE_PROJECT_ENV,
       OPENALICE_UTA_PORT: String(UTA_PORT),
       OPENALICE_HOME: DATA_HOME,
       AQ_LAUNCHER_ROOT: LAUNCHER_ROOT,
@@ -301,6 +323,7 @@ function spawnConnector() {
   const child = spawn(NODE_BINARY, ['services/connector/dist/connector.cjs'], {
     env: {
       ...process.env,
+      ...ALICE_PROJECT_ENV,
       OPENALICE_CONNECTOR_PORT: String(CONNECTOR_PORT),
       OPENALICE_HOME: DATA_HOME,
       AQ_LAUNCHER_ROOT: LAUNCHER_ROOT,
@@ -312,9 +335,11 @@ function spawnConnector() {
     stdio: 'inherit',
   })
   child.once('exit', (code, signal) => {
+    if (connectorChild === child) connectorChild = null
     if (stopping || restartingConnector) return
     connectorStatus = 'offline'
     console.error(`[guardian/prod] Connector exited unexpectedly (code=${code}, signal=${signal}) — external notifications offline, Alice stays up`)
+    scheduleConnectorRecovery()
   })
   return child
 }
@@ -323,6 +348,7 @@ function spawnAlice() {
   const child = spawn(NODE_BINARY, ['dist/main.js'], {
     env: {
       ...process.env,
+      ...ALICE_PROJECT_ENV,
       OPENALICE_WEB_PORT: String(WEB_PORT),
       OPENALICE_MCP_PORT: String(MCP_PORT),
       OPENALICE_TOOL_BASE_URL: `http://127.0.0.1:${MCP_PORT}/cli`,
@@ -334,6 +360,9 @@ function spawnAlice() {
       OPENALICE_GUARDIAN_PID: String(process.pid),
       OPENALICE_GUARDIAN_STARTED_AT: String(GUARDIAN_STARTED_AT),
       ...(TAKEOVER ? { OPENALICE_TAKEOVER: '1' } : {}),
+      ...(PROJECT_PRODUCT === 'nano'
+        ? { OPENALICE_PROJECT_PRODUCT: 'nano', OPENALICE_UTA_DISABLED: '1' }
+        : {}),
     },
     stdio: 'inherit',
   })
@@ -387,8 +416,9 @@ async function waitForConnector() {
   return false
 }
 
-async function restartConnector() {
-  if (stopping) return
+async function restartConnector({ recovery = false } = {}) {
+  if (stopping) return false
+  if (!recovery) connectorRecovery.reset()
   const enabled = await readConnectorEnabled()
   if (!enabled) {
     if (connectorChild && connectorChild.exitCode === null) {
@@ -399,9 +429,9 @@ async function restartConnector() {
       connectorChild = null
     }
     connectorStatus = 'disabled'
-    return
+    return true
   }
-  if (restartingConnector) return
+  if (restartingConnector) return false
   restartingConnector = true
   connectorStatus = 'starting'
   try {
@@ -418,25 +448,41 @@ async function restartConnector() {
     connectorChild = spawnConnector()
     const ready = await waitForConnector()
     connectorStatus = ready ? 'ready' : 'offline'
-    if (!ready) console.error('[guardian/prod] Connector did not become ready')
-    else console.log('[guardian/prod] Connector ready')
+    if (!ready) {
+      console.error('[guardian/prod] Connector did not become ready')
+      scheduleConnectorRecovery()
+    }
+    else {
+      connectorRecovery.reset()
+      console.log('[guardian/prod] Connector ready')
+    }
+    return ready
+  } catch (error) {
+    connectorStatus = 'offline'
+    scheduleConnectorRecovery()
+    throw error
   } finally {
     restartingConnector = false
   }
 }
 
+function scheduleConnectorRecovery() {
+  connectorRecovery.schedule(() => restartConnector({ recovery: true }))
+}
+
 async function restartUTA() {
   if (stopping) return
   TRADING_MODE = await resolveTradingMode(process.env, DATA_HOME)
-  if (TRADING_MODE.mode === 'lite') {
+  const product = await readAliceProjectProduct(DATA_HOME)
+  if (product === 'nano' || TRADING_MODE.mode === 'lite') {
     if (utaChild && utaChild.exitCode === null) {
-      console.log('[guardian/prod] trading mode lite — stopping UTA')
+      console.log(`[guardian/prod] ${product === 'nano' ? 'NanoAlice' : 'trading mode lite'} — stopping UTA`)
       restartingUTA = true
       try { utaChild.kill('SIGTERM') } catch { /* noop */ }
       restartingUTA = false
       utaChild = null
     } else {
-      console.warn('[guardian/prod] restart-uta.flag ignored — trading mode lite disables UTA')
+      console.warn(`[guardian/prod] restart-uta.flag ignored — ${product === 'nano' ? 'NanoAlice' : 'trading mode lite'} disables UTA`)
     }
     utaStatus = 'disabled'
     return
@@ -482,6 +528,7 @@ function shutdown(exitCode = 0) {
   shutdownExitCode = Math.max(shutdownExitCode, normalizeProcessExitCode(exitCode))
   if (stopping) return
   stopping = true
+  connectorRecovery.stop()
   if (aliceChild) aliceStatus = 'stopping'
   if (utaChild) utaStatus = 'stopping'
   if (connectorChild) connectorStatus = 'stopping'
@@ -563,7 +610,7 @@ async function main() {
   })
   console.log(`[guardian/prod] Control → ${guardianControlServer.endpoint}`)
 
-  if (TRADING_MODE.mode !== 'lite') {
+  if (!SKIP_UTA) {
     utaStatus = 'starting'
     utaChild = spawnUTA()
     void waitForUTA().then((ready) => {
@@ -578,8 +625,13 @@ async function main() {
     connectorChild = spawnConnector()
     void waitForConnector().then((ready) => {
       connectorStatus = ready ? 'ready' : 'offline'
-      if (ready) console.log('[guardian/prod] Connector ready')
-      else console.warn('[guardian/prod] Connector did not become ready within 15s — external notifications offline')
+      if (ready) {
+        connectorRecovery.reset()
+        console.log('[guardian/prod] Connector ready')
+      } else {
+        console.warn('[guardian/prod] Connector did not become ready within 15s — external notifications offline')
+        scheduleConnectorRecovery()
+      }
     })
   }
 

@@ -21,6 +21,7 @@ import {
   type ArtifactOrigin,
 } from '@/core/provenance-store.js';
 import {
+  readHarnessPreferences,
   readQuickChatPreferences,
   rememberRecentChatWorkspace,
 } from '@/core/preferences.js';
@@ -42,6 +43,8 @@ import {
   resolveSessionRuntimeBinding,
   type SessionRuntimeSelection,
 } from './session-runtime-binding.js';
+import type { SessionCreatedBy } from './session-metadata.js';
+import { sessionMetadata } from './session-metadata.js';
 import {
   readWorkspaceRuntimeSettings,
   rememberWorkspaceRuntimeBinding,
@@ -51,6 +54,7 @@ import {
 import { logger as launcherLogger } from './logger.js';
 import { runHeadlessProbe, type HeadlessProbeResult } from './probe.js';
 import { headlessTaskStatus, runHeadlessTask, type HeadlessTaskResult } from './headless-task.js';
+import type { HeadlessStructuredOutput } from './headless-output.js';
 import {
   checkingRuntimeReadinessRow,
   failedRuntimeReadinessRow,
@@ -95,11 +99,22 @@ import {
 } from './issues/board.js';
 import {
   buildWorkspaceSessionDirectory,
+  connectorDeskRosterExclusions,
+  issueRosterAttachments,
   type WorkspaceSessionDirectory,
 } from './session-directory.js';
 import { completeOneShotIssueAfterRun } from './issues/auto-complete.js';
-import { readIssueComments } from './issues/comments.js';
+import { readIssueComments, updateIssueCommentProgress } from './issues/comments.js';
 import { recordIssueCommentReply } from './issues/comment-delivery.js';
+import {
+  createProgressPublisher,
+  projectTurnProgress,
+} from './headless-progress.js';
+import { stampTelegramDeskScheduledFire } from './issues/telegram-desk-chat.js';
+import {
+  deskProgressScope,
+  projectWorkspaceDeskTurnProgress,
+} from './issues/telegram-desk-project.js';
 import {
   IssueChangeTracker,
   issueMutation,
@@ -113,8 +128,22 @@ import {
 import {
   issueAssigneeClaimsFirstSession,
   issueAssigneeResumeId,
+  isConnectorDeskIssue,
   type IssueRecord,
 } from './issues/declaration.js';
+import {
+  createConnectorDesk as createConnectorDeskFile,
+  disableConnectorDesk as disableConnectorDeskFile,
+  findConnectorDesks,
+  isConnectorDeskCadence,
+  updateConnectorDesk as updateConnectorDeskFile,
+  type ConnectorDesk,
+  type ConnectorDeskCadence,
+} from './issues/connector-desk.js';
+import {
+  BUILTIN_CONNECTOR_DEFINITIONS,
+  connectorDefinitionHasCapability,
+} from '@traderalice/connector-protocol';
 import { sessionSignature } from './session-signature.js';
 import { issueRunFailure } from './issues/run-failure.js';
 import type { IInboxStore } from '@/core/inbox-store.js';
@@ -124,6 +153,18 @@ import {
   type AgentConversationDispatch,
 } from './agent-conversation-log.js';
 import {
+  AgentRuntimeLog,
+  conversationCause,
+  issueCause,
+  type AgentRuntimeCause,
+  type AgentRuntimeEventType,
+  type AgentRuntimePayload,
+} from './agent-runtime-log.js';
+import {
+  createHeadlessTurnJournal,
+  headlessCompletionAssets,
+} from './agent-runtime-turn.js';
+import {
   HeadlessTaskRegistry,
   headlessLogPaths,
   type HeadlessTaskInquiry,
@@ -131,9 +172,16 @@ import {
   type HeadlessTaskStatus,
   type HeadlessTaskTrigger,
 } from './headless-task-registry.js';
-import { ResumeRegistry } from './resume-registry.js';
+import {
+  ResumePresenceError,
+  ResumeRegistry,
+  sessionPresence,
+  type ResumeIdentityRecord,
+  type SessionPresence,
+} from './resume-registry.js';
 import { WorkspaceSessionRuntimeStore } from './session-runtime-store.js';
 import {
+  AUTO_PREDICTION_WORKSPACE_TEMPLATE,
   AUTO_QUANT_WORKSPACE_TEMPLATE,
   ChatWorkspaceResolver,
   TemplateWorkspaceResolver,
@@ -149,6 +197,7 @@ function automationOwnerState(assignee: string, resumes: ResumeRegistry): IssueA
   const identity = resumes.get(resumeId);
   if (!identity) return 'missing';
   if (identity.lifecycle === 'retired') return 'retired';
+  if (identity.presence === 'deleted') return 'deleted';
   return identity.agentSessionId ? 'ready' : 'unbound';
 }
 
@@ -174,7 +223,7 @@ export class HeadlessCapacityError extends Error {
 
 export class HeadlessResumeError extends Error {
   constructor(
-    public readonly code: 'not_found' | 'wrong_workspace' | 'wrong_agent' | 'not_ready' | 'retired' | 'busy',
+    public readonly code: 'not_found' | 'wrong_workspace' | 'wrong_agent' | 'not_ready' | 'retired' | 'deleted' | 'busy',
     message: string,
   ) {
     super(message);
@@ -316,6 +365,7 @@ import {
   SessionRegistry,
   type SessionRecord,
 } from './session-registry.js';
+import { ProductSessionCoordinator } from './product-session-coordinator.js';
 import { projectPublicSession } from './public-session.js';
 import { NativeSessionTitleResolver } from './session-title-resolver.js';
 import { buildCliPath, buildSpawnEnv } from './spawn-env.js';
@@ -337,6 +387,8 @@ import {
 import { WebPiSessionHost, type WebPiSnapshot } from './webpi-session-host.js';
 import { WorkspaceRegistry, type WorkspaceMeta } from './workspace-registry.js';
 import { readHarnessSource } from './harness-source.js';
+import { HarnessSourceUpgradeManager } from './harness-source-upgrade.js';
+import { HarnessSurfaceManager } from './harness-surface-manager.js';
 import {
   createManagerWorkspaceMeta,
   MANAGER_WORKSPACE_ID,
@@ -366,13 +418,17 @@ export interface SpawnPlan {
 export interface WorkspaceService {
   readonly config: ServerConfig;
   readonly registry: WorkspaceRegistry;
+  /** Supervised Harness-owned web applications and their opaque route table. */
+  readonly harnessSurfaces: HarnessSurfaceManager;
   readonly catalog: WorkspaceCatalog;
   readonly lifecycle: WorkspaceLifecycleManager;
   readonly templateUpgrades: TemplateUpgradeManager;
+  readonly sourceUpgrades: HarnessSourceUpgradeManager;
   readonly workspaceAbsorbs: WorkspaceAbsorbManager;
   /** Coordinates runtime starts with directory-wide lifecycle operations. */
   readonly operationGuard: WorkspaceOperationGuard;
   readonly sessionRegistry: SessionRegistry;
+  readonly sessionCoordinator: ProductSessionCoordinator;
   readonly scrollbackStore: ScrollbackStore;
   readonly templates: TemplateRegistry;
   readonly adapters: AdapterRegistry;
@@ -390,6 +446,11 @@ export interface WorkspaceService {
   resolveOrCreateChatWorkspace(preferredWorkspaceId?: string | null): Promise<ChatWorkspaceResolution>;
   /** Resolve the latest durable AutoQuant desk, creating a pinned starter when absent. */
   resolveOrCreateAutoQuantWorkspace(
+    preferredWorkspaceId?: string | null,
+    sourceVersion?: string,
+  ): Promise<TemplateWorkspaceResolution>;
+  /** Resolve the durable Auto Prediction desk, creating a pinned starter when absent. */
+  resolveOrCreateAutoPredictionWorkspace(
     preferredWorkspaceId?: string | null,
     sourceVersion?: string,
   ): Promise<TemplateWorkspaceResolution>;
@@ -492,9 +553,11 @@ export interface WorkspaceService {
     selection?: SessionRuntimeSelection,
     /** Cross-Agent message metadata for the independent conversation log. */
     conversation?: AgentConversationDispatch,
+    /** Birth stamp when this dispatch allocates a new product Session. */
+    createdBy?: SessionCreatedBy,
   ): Promise<{ taskId: string; resumeId: string }>;
   /** Read-only scheduling projection of every workspace's `.alice/issues/`
-   *  directory (scheduled issues only) + each task's last-fired marker and
+   *  directory (scheduled issues only) + each task's dispatch cursor and
    *  computed next-due. Powers GET /api/schedule. */
   scheduleSnapshot(): Promise<ScheduleSnapshot>;
   /** Read-only snapshot of every workspace's `.alice/issues/` directory — ALL
@@ -508,8 +571,43 @@ export interface WorkspaceService {
   /** Retry the latest unsuccessful scheduled execution now. Reuses the live
    * Issue prompt/owner/runtime and never advances its schedule marker. */
   retryIssue(wsId: string, id: string): Promise<IssueDetail>;
+  /** Dispatch a scheduled Issue immediately without requiring a failed last
+   * run and without advancing its next-fire marker. */
+  runIssueNow(wsId: string, id: string): Promise<IssueDetail>;
+  connectorDesk(connectorId: string): Promise<ConnectorDesk | null>;
+  createConnectorDesk(connectorId: string, wsId: string): Promise<ConnectorDesk>;
+  updateConnectorDesk(connectorId: string, patch: {
+    what?: string;
+    when?: { kind: 'every'; every: ConnectorDeskCadence };
+  }): Promise<ConnectorDesk>;
+  disableConnectorDesk(connectorId: string): Promise<ConnectorDesk | null>;
+  telegramConnectorDesk(): Promise<ConnectorDesk | null>;
+  createTelegramConnectorDesk(wsId: string): Promise<ConnectorDesk>;
+  updateTelegramConnectorDesk(patch: {
+    what?: string;
+    when?: { kind: 'every'; every: ConnectorDeskCadence };
+  }): Promise<ConnectorDesk>;
+  disableTelegramConnectorDesk(): Promise<ConnectorDesk | null>;
   /** Safe Workspace Session index. resumeId is the only public conversation handle. */
   sessionDirectory(wsId: string, limit?: number): Promise<WorkspaceSessionDirectory | null>;
+  /** Change in-desk floor presence. Does not retire or delete the coworker. */
+  setSessionPresence(input: {
+    wsId: string
+    resumeId: string
+    presence: SessionPresence
+  }): Promise<ResumeIdentityRecord>;
+  /** Set or clear the Workspace-owned coworker nametag. Does not touch title or AI. */
+  setSessionDisplayName(input: {
+    wsId: string
+    resumeId: string
+    displayName: string | null
+  }): Promise<ResumeIdentityRecord>;
+  /** Move a paused Session through the recoverable archive boundary into the
+   *  soft-deleted presence state while holding one resume lease. */
+  deleteSessionPresence(input: {
+    wsId: string
+    resumeId: string
+  }): Promise<ResumeIdentityRecord>;
   /** Resolve a `[[name]]` token to the issues across ALL workspaces that claim it.
    *  Matches case-insensitively against an issue's `id` OR its `title` (either is a
    *  valid name handle). Returns every match — 0, 1, or many (a collision the UI
@@ -523,6 +621,13 @@ export interface WorkspaceService {
   provenanceStore: ArtifactProvenanceStore;
   /** Append-only analysis/audit projection of cross-Agent messages. */
   agentConversationLog: AgentConversationLog;
+  /** Append-only desk/employee occupancy journal. Never a dispatch authority. */
+  agentRuntimeLog: AgentRuntimeLog;
+  recordAgentRuntime(
+    type: AgentRuntimeEventType,
+    payload: AgentRuntimePayload,
+    opts?: { readonly causedBy?: number },
+  ): Promise<void>;
   /** True while a headless turn owns this conversation transcript. */
   isResumeActive(resumeId: string): boolean;
   /** Atomically reserve a conversation before crossing an async spawn boundary. */
@@ -579,6 +684,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     `${config.launcherRoot}/workspaces.json`,
     launcherLogger.child({ scope: 'registry' }),
   );
+  const harnessSurfaces = new HarnessSurfaceManager(registry);
   const catalog = await WorkspaceCatalog.load(
     join(config.launcherRoot, 'state', 'workspace-catalog.json'),
     registry.list(),
@@ -623,12 +729,56 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     join(config.launcherRoot, 'state', 'agent-conversations.jsonl'),
     launcherLogger.child({ scope: 'agent-conversation-log' }),
   );
+  const agentRuntimeLog = await AgentRuntimeLog.open(
+    join(config.launcherRoot, 'state', 'agent-runtime.jsonl'),
+    launcherLogger.child({ scope: 'agent-runtime-log' }),
+  );
+  const recordAgentRuntime = async (
+    type: AgentRuntimeEventType,
+    payload: AgentRuntimePayload,
+    opts?: { readonly causedBy?: number },
+  ): Promise<void> => {
+    await agentRuntimeLog.record(type, payload, opts);
+  };
+
+  const runtimeCauseFromDispatch = (
+    conversation?: AgentConversationDispatch,
+    trigger?: HeadlessTaskTrigger,
+  ): AgentRuntimeCause => {
+    if (conversation) {
+      const source = conversation.source;
+      return conversationCause({
+        source: source.kind === 'session'
+          ? {
+              kind: 'session',
+              resumeId: source.resumeId,
+              workspaceId: source.workspaceId,
+              agent: source.agent,
+            }
+          : source.kind === 'workspace'
+            ? { kind: 'workspace', workspaceId: source.workspaceId }
+            : { kind: 'human' },
+        resolution: conversation.resolution.mode === 'reconstructed' ? 'reconstructed' : 'exact',
+      });
+    }
+    if (trigger?.kind === 'issue') return issueCause(trigger.workspaceId, trigger.issueId);
+    return { kind: 'http' };
+  };
   const issueChangeTracker = await IssueChangeTracker.load(
     join(config.launcherRoot, 'state', 'issue-audit-snapshots.json'),
     provenanceStore,
     launcherLogger.child({ scope: 'issue-change-tracker' }),
   );
   const activeResumeIds = new Set<string>();
+  // Settings owns the one-per-AliceProject phone desk. Serialize its
+  // read-check-write lifecycle so two browser tabs cannot both pass the
+  // uniqueness check before either Issue file reaches disk.
+  let telegramDeskMutationTail: Promise<unknown> = Promise.resolve();
+  const serializeTelegramDeskMutation = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = telegramDeskMutationTail.then(operation, operation);
+    telegramDeskMutationTail = result.then(() => undefined, () => undefined);
+    return result;
+  };
   const claimResume = (resumeId: string): boolean => {
     if (activeResumeIds.has(resumeId)) return false;
     activeResumeIds.add(resumeId);
@@ -753,6 +903,40 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     }
   };
 
+  const telegramDeskChatHost = {
+    listWorkspaces: () => registry.list().map((workspace) => ({ id: workspace.id, dir: workspace.dir })),
+    getWorkspace: (id: string) => {
+      const workspace = registry.get(id);
+      return workspace ? { id: workspace.id, dir: workspace.dir } : undefined;
+    },
+    provenanceStore: () => provenanceStore,
+    conversation: () => undefined,
+  };
+
+  const stampTelegramDeskFire = async (
+    task: HeadlessTaskRecord,
+    assistantText?: string | null,
+  ): Promise<void> => {
+    if (task.trigger?.kind !== 'issue') return;
+    if (task.inquiry?.subject.kind === 'issue' && task.inquiry.subject.commentId) return;
+    try {
+      await stampTelegramDeskScheduledFire({
+        host: telegramDeskChatHost,
+        workspaceId: task.trigger.workspaceId,
+        issueId: task.trigger.issueId,
+        task,
+        ...(assistantText !== undefined ? { assistantText } : {}),
+      });
+    } catch (err) {
+      launcherLogger.warn('telegram_desk.fire_stamp_failed', {
+        taskId: task.taskId,
+        wsId: task.trigger.workspaceId,
+        issueId: task.trigger.issueId,
+        err,
+      });
+    }
+  };
+
   const scrollbackStore = new ScrollbackStore(
     join(config.launcherRoot, 'state'),
     launcherLogger.child({ scope: 'scrollback' }),
@@ -775,12 +959,31 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       version: '0.0.0',
       defaultAgents: ['claude'],
       injectTools: false,
-      injectPersona: false,
+      injectInstructions: false,
       bundledSkills: [],
     });
   }
 
   const adapters = createBuiltinAdapterRegistry();
+  const sessionCoordinator = new ProductSessionCoordinator(
+    resumeRegistry,
+    sessionRegistry,
+    launcherLogger.child({ scope: 'product-session' }),
+  );
+  await sessionCoordinator.reconcile({
+    namePrefixForAgent: (agent) => {
+      const adapter = adapters.get(agent);
+      return adapter?.namePrefix ?? adapter?.id[0] ?? agent[0] ?? 's';
+    },
+    fallbackForResume: (resumeId) => {
+      const task = headlessTasks.latestForResumeId(resumeId);
+      return task ? { title: task.prompt, sourceRunId: task.taskId } : undefined;
+    },
+    shouldRetain: (identity) => {
+      const lifecycle = catalog.get(identity.wsId)?.lifecycle;
+      return lifecycle !== 'purging' && lifecycle !== 'purged';
+    },
+  });
   const sessionTitleResolver = new NativeSessionTitleResolver({
     sessionRegistry,
     resumeRegistry,
@@ -818,6 +1021,11 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     { registry, sessionRegistry, creator },
     AUTO_QUANT_WORKSPACE_TEMPLATE,
     'auto-quant',
+  );
+  const autoPredictionWorkspaceResolver = new TemplateWorkspaceResolver(
+    { registry, sessionRegistry, creator },
+    AUTO_PREDICTION_WORKSPACE_TEMPLATE,
+    'prediction',
   );
 
   const transcriptWatcher = new TranscriptWatcher(
@@ -979,7 +1187,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     // A batch-only fallback still resolves viaShell:true; drop a user seed in
     // that legacy case because cmd would re-parse & | < > ^ %. The TUI still
     // opens, just not pre-filled. Resolve the COMPOSED argv0 (the adapter's real
-    // binary), not config.command — codex/opencode/pi ignore the base.
+    // binary), not config.command — grok/codex/opencode/pi ignore the base.
     const compose = (withSeed: boolean): readonly string[] =>
       adapter.composeCommand(
         config.command,
@@ -1035,6 +1243,11 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     sourceVersion?: string,
   ): Promise<TemplateWorkspaceResolution> =>
     autoQuantWorkspaceResolver.resolveOrCreate(preferredWorkspaceId, sourceVersion);
+  const resolveOrCreateAutoPredictionWorkspaceMethod = (
+    preferredWorkspaceId?: string | null,
+    sourceVersion?: string,
+  ): Promise<TemplateWorkspaceResolution> =>
+    autoPredictionWorkspaceResolver.resolveOrCreate(preferredWorkspaceId, sourceVersion);
 
   let runtimeReadinessWorkspaceInFlight: Promise<WorkspaceMeta> | null = null;
 
@@ -1386,6 +1599,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       sessionRuntime?: ResolvedSessionRuntimeBinding;
       /** Record this supplied binding only after a fresh child actually spawns. */
       rememberRuntime?: boolean;
+      onProgress?: (snapshot: HeadlessStructuredOutput) => void;
     } = {},
   ): Promise<HeadlessTaskResult> => {
     const operationLease = workspaceOperationGuard.acquire(ws.id, 'headless-run');
@@ -1494,6 +1708,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
             ? { keepDiagnosticLine: adapter.keepHeadlessDiagnosticLine.bind(adapter) }
             : {}),
           ...(opts.onSessionId ? { onSessionId: opts.onSessionId } : {}),
+          ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
           onChildSpawned: (child) => {
             activityLease.attach(child);
             if (rememberRuntime && existsSync(ws.dir)) {
@@ -1542,6 +1757,8 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     inquiry?: HeadlessTaskInquiry,
     selection?: SessionRuntimeSelection,
     conversation?: AgentConversationDispatch,
+    /** Birth stamp when this dispatch allocates a new product Session. */
+    createdBy?: SessionCreatedBy,
   ): Promise<{ taskId: string; resumeId: string }> => {
     if (catalog.get(ws.id)?.lifecycle !== 'active') {
       throw new Error(`workspace is not active: ${ws.id}`);
@@ -1561,6 +1778,9 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       if (identity.lifecycle === 'retired') {
         throw new HeadlessResumeError('retired', 'resume conversation is retired');
       }
+      if (sessionPresence(identity) === 'deleted') {
+        throw new HeadlessResumeError('deleted', 'resume conversation is deleted');
+      }
       if (identity.wsId !== ws.id) {
         throw new HeadlessResumeError('wrong_workspace', 'resume conversation belongs to another workspace');
       }
@@ -1571,9 +1791,9 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
         throw new HeadlessResumeError('not_ready', 'runtime session id has not been captured yet');
       }
       await sessionRegistry.ensureLoaded(ws.id);
-      const interactive = sessionRegistry.findByResumeId(ws.id, resumeId);
-      if (interactive?.state === 'running') {
-        throw new HeadlessResumeError('busy', 'this conversation is open in an interactive session');
+      const productSession = sessionRegistry.findByResumeId(ws.id, resumeId);
+      if (productSession?.state === 'running') {
+        throw new HeadlessResumeError('busy', 'this conversation already has a running execution');
       }
       // Reserve before the first await below. Without this, two HTTP requests
       // can both pass the check and mutate one native transcript concurrently.
@@ -1605,17 +1825,38 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       });
     }
     let rec: HeadlessTaskRecord;
+    let productSessionResumeId: string | undefined;
+    let occupancySessionId: string | undefined;
     try {
-      // ResumeRegistry is the sole allocator for product conversation ids.
-      // HeadlessTaskRegistry only records executions against that identity.
-      const identity = await resumeRegistry.ensure({
+      // ResumeRegistry remains the sole product-id allocator, while the
+      // coordinator guarantees that the same birth also enters the durable
+      // Session roster. HeadlessTaskRegistry records only this execution.
+      const productSession = await sessionCoordinator.ensure({
         ...(resumeId ? { resumeId } : {}),
         wsId: ws.id,
         agent: adapter.id,
+        namePrefix: adapter.namePrefix ?? adapter.id[0] ?? 's',
         runtimeBinding: sessionRuntime.binding,
+        ...(!resumeId && createdBy ? { metadata: sessionMetadata(createdBy) } : {}),
+        state: 'running',
+        surface: 'headless',
+        fallbackTitle: prompt,
       });
+      const identity = productSession.identity;
+      productSessionResumeId = identity.resumeId;
+      occupancySessionId = productSession.session.id;
       if (catalog.get(ws.id)?.lifecycle !== 'active') {
         throw new Error(`workspace stopped accepting work during dispatch: ${ws.id}`);
+      }
+      let occupancyCauseSeq: number | undefined;
+      if (productSession.created) {
+        const born = await agentRuntimeLog.record('session.born', {
+          workspaceId: ws.id,
+          resumeId: identity.resumeId,
+          agent: adapter.id,
+          sessionRecordId: productSession.session.id,
+        });
+        occupancyCauseSeq = born?.seq;
       }
       rec = await headlessTasks.create({
         wsId: ws.id,
@@ -1628,12 +1869,20 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
         ...(parentTaskId ? { parentTaskId } : {}),
         ...(trigger ? { trigger } : {}),
         ...(inquiry ? { inquiry } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       });
       await resumeRegistry.ensure({
         resumeId: identity.resumeId,
         wsId: ws.id,
         agent: adapter.id,
         latestTaskId: rec.taskId,
+      });
+      await sessionCoordinator.transition({
+        wsId: ws.id,
+        resumeId: identity.resumeId,
+        state: 'running',
+        surface: 'headless',
+        sourceRunId: rec.taskId,
       });
       if (conversation) {
         await agentConversationLog.recordDispatch({
@@ -1646,11 +1895,87 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
           conversation,
         });
       }
+      await agentRuntimeLog.record('runtime.started', {
+        workspaceId: ws.id,
+        resumeId: rec.resumeId,
+        agent: adapter.id,
+        sessionRecordId: productSession.session.id,
+        taskId: rec.taskId,
+        surface: 'headless',
+        cause: runtimeCauseFromDispatch(conversation, trigger),
+      }, occupancyCauseSeq !== undefined ? { causedBy: occupancyCauseSeq } : undefined);
     } catch (err) {
+      if (productSessionResumeId) {
+        await sessionCoordinator.transition({
+          wsId: ws.id,
+          resumeId: productSessionResumeId,
+          state: 'paused',
+          surface: 'headless',
+        }).catch((transitionErr) => launcherLogger.warn('product_session.dispatch_rollback_failed', {
+          wsId: ws.id,
+          resumeId: productSessionResumeId,
+          err: transitionErr,
+        }));
+      }
       if (resumeId) activeResumeIds.delete(resumeId);
       throw err;
     }
     if (!resumeId) activeResumeIds.add(rec.resumeId);
+    const occupancySubject = {
+      workspaceId: ws.id,
+      resumeId: rec.resumeId,
+      agent: adapter.id,
+      ...(occupancySessionId ? { sessionRecordId: occupancySessionId } : {}),
+      taskId: rec.taskId,
+      surface: 'headless' as const,
+    };
+    const turnJournal = createHeadlessTurnJournal({
+      subject: occupancySubject,
+      record: (type, payload) => agentRuntimeLog.record(type, payload),
+    });
+    const progressPublisher = createProgressPublisher({
+      publish: async (progress) => {
+        await headlessTasks.setProgress(rec.taskId, progress);
+        const subject = rec.inquiry?.subject;
+        if (subject?.kind === 'issue' && subject.commentId) {
+          const issueWorkspace = registry.get(subject.workspaceId);
+          if (issueWorkspace) {
+            const updated = await updateIssueCommentProgress(
+              issueWorkspace.dir,
+              subject.issueId,
+              subject.commentId,
+              progress,
+            );
+            if (!updated.ok) {
+              launcherLogger.warn('issue.comment_progress_failed', {
+                taskId: rec.taskId,
+                wsId: subject.workspaceId,
+                issueId: subject.issueId,
+                commentId: subject.commentId,
+                error: updated.error,
+              });
+            }
+          }
+        }
+        const desk = deskProgressScope(rec);
+        if (!desk) return;
+        const deskWorkspace = registry.get(desk.workspaceId);
+        if (!deskWorkspace) return;
+        await projectWorkspaceDeskTurnProgress({
+          wsDir: deskWorkspace.dir,
+          issueId: desk.issueId,
+          scopeId: desk.scopeId,
+          progress,
+          triggerMetadata: rec.trigger?.metadata,
+        }).catch((err) => launcherLogger.warn('telegram.desk_progress_failed', {
+          taskId: rec.taskId,
+          wsId: desk.workspaceId,
+          issueId: desk.issueId,
+          scopeId: desk.scopeId,
+          err,
+        }));
+      },
+    });
     // Fire-and-forget: run to natural exit, then fill the record. Process
     // failures and terminal in-band runtime errors fail the task; retryable
     // errors followed by a later assistant reply remain visible in Activity
@@ -1661,6 +1986,10 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       ...(nativeResume ? { resume: nativeResume } : {}),
       sessionRuntime,
       ...(!resumeId ? { rememberRuntime: true } : {}),
+      onProgress: (snapshot) => {
+        turnJournal.offer(snapshot);
+        progressPublisher.offer(projectTurnProgress(snapshot));
+      },
       onSessionId: (id) => {
         void Promise.all([
           headlessTasks.setAgentSessionId(rec.taskId, id),
@@ -1673,6 +2002,9 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       },
     })
       .then(async (r) => {
+        turnJournal.offer(r.structured);
+        progressPublisher.offer(projectTurnProgress(r.structured));
+        await Promise.all([turnJournal.flush(), progressPublisher.flush()]);
         const status = headlessTaskStatus(r);
         await headlessTasks.complete(rec.taskId, {
           status,
@@ -1704,12 +2036,28 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
             ...(status !== 'done' && r.stderrTail ? { error: r.stderrTail.slice(-1000) } : {}),
           });
         }
+        if (r.processStarted === false) {
+          await agentRuntimeLog.record('runtime.spawn_failed', {
+            ...occupancySubject,
+            ...(r.launchErrorCode ? { launchErrorCode: r.launchErrorCode } : {}),
+            ...(r.error ? { error: r.error } : {}),
+          });
+        } else {
+          await agentRuntimeLog.record('runtime.stopped', {
+            ...occupancySubject,
+            status,
+            exitCode: r.exitCode,
+            ...(r.error ? { error: r.error } : {}),
+            ...headlessCompletionAssets(r.structured),
+          });
+        }
         await completeIssueCommentInquiry({
           task: rec,
           status,
           assistantText: r.structured.assistantText,
           ...(status !== 'done' && r.stderrTail ? { error: r.stderrTail.slice(-1000) } : {}),
         });
+        await stampTelegramDeskFire(rec, r.structured.assistantText);
         // Scheduled one-shot issues are the only board items whose lifecycle can
         // be closed mechanically from a run exit. Repeating schedules keep their
         // issue open; failed one-shots stay open so the operator can inspect and
@@ -1758,6 +2106,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
         );
       })
       .catch(async (err) => {
+        await Promise.all([turnJournal.flush(), progressPublisher.flush()]);
         const message = err instanceof Error ? err.message : String(err);
         await headlessTasks.complete(rec.taskId, {
           status: 'failed',
@@ -1773,6 +2122,16 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
             error: message,
           });
         }
+        await agentRuntimeLog.record('runtime.stopped', {
+          workspaceId: ws.id,
+          resumeId: rec.resumeId,
+          agent: adapter.id,
+          ...(occupancySessionId ? { sessionRecordId: occupancySessionId } : {}),
+          taskId: rec.taskId,
+          surface: 'headless',
+          status: 'failed',
+          error: message,
+        });
         await completeIssueCommentInquiry({
           task: rec,
           status: 'failed',
@@ -1786,7 +2145,20 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
           }),
         );
       })
-      .finally(() => activeResumeIds.delete(rec.resumeId));
+      .finally(async () => {
+        await sessionCoordinator.transition({
+          wsId: ws.id,
+          resumeId: rec.resumeId,
+          state: 'paused',
+          surface: 'headless',
+        }).catch((err) => launcherLogger.warn('product_session.headless_pause_failed', {
+          wsId: ws.id,
+          resumeId: rec.resumeId,
+          taskId: rec.taskId,
+          err,
+        }));
+        activeResumeIds.delete(rec.resumeId);
+      });
     return { taskId: rec.taskId, resumeId: rec.resumeId };
   };
 
@@ -1794,7 +2166,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
   // files and fire due SCHEDULED issues as headless runs through the SAME dispatch
   // primitive (issues without a `when` are pure board items, ignored here). The
   // scanner owns its own tick (infra periodicity, NOT a scheduled task) and
-  // persists only a last-fired marker — never the schedule itself, which lives
+  // persists only dispatch cursors — never the schedule itself, which lives
   // solely in the workspace's file.
   const scheduleMarkers = await ScheduleMarkerStore.load(
     join(config.launcherRoot, 'state', 'schedule-markers.json'),
@@ -1804,13 +2176,16 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     registry,
     resolveResumeWorkspace: (resumeId) => {
       const identity = resumeRegistry.get(resumeId);
-      return identity && identity.lifecycle !== 'retired' ? registry.get(identity.wsId) : undefined;
+      return identity && identity.lifecycle !== 'retired' && sessionPresence(identity) !== 'deleted'
+        ? registry.get(identity.wsId)
+        : undefined;
     },
     resolveAdapter: async (ws, agentId, resumeId) => {
       if (resumeId) {
         const identity = resumeRegistry.get(resumeId);
         if (!identity) throw new Error(`unknown resume conversation: ${resumeId}`);
         if (identity.lifecycle === 'retired') throw new Error(`retired resume conversation: ${resumeId}`);
+        if (sessionPresence(identity) === 'deleted') throw new Error(`deleted resume conversation: ${resumeId}`);
         if (identity.wsId !== ws.id) throw new Error(`resume conversation workspace resolution drifted`);
         return resolveAdapter(ws, identity.agent);
       }
@@ -1909,6 +2284,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
               scheduleMarkers.get(ws.id, issue.id) ?? null,
               nowMs,
               DEFAULT_INTERVAL_MS,
+              scheduleMarkers.getHeld(ws.id, issue.id) ?? null,
             ),
           );
         }
@@ -1938,7 +2314,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
           return { wsId: ws.id, tag: ws.tag, status: 'invalid', error: res.error, issues: [] };
         }
         await observeIssueRecords(ws, res.issues);
-        const issues: IssuesSnapshotIssue[] = res.issues.map((issue) => {
+        const issues: IssuesSnapshotIssue[] = res.issues.filter((issue) => !isConnectorDeskIssue(issue)).map((issue) => {
           // Unscheduled ⇒ pure board work item, no firing markers.
           if (!issue.when) return snapshotBoardIssue(issue, null);
           // Scheduled ⇒ reuse the schedule snapshot's math so the board's
@@ -1949,6 +2325,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
             scheduleMarkers.get(ws.id, issue.id) ?? null,
             nowMs,
             DEFAULT_INTERVAL_MS,
+            scheduleMarkers.getHeld(ws.id, issue.id) ?? null,
           );
           const latestRun = headlessTasks.list({ issue: { workspaceId: ws.id, issueId: issue.id } })[0];
           return snapshotBoardIssue(
@@ -2002,6 +2379,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
         scheduleMarkers.get(ws.id, issue.id) ?? null,
         Date.now(),
         DEFAULT_INTERVAL_MS,
+        scheduleMarkers.getHeld(ws.id, issue.id) ?? null,
       );
       scheduledSnapshot = fired;
     }
@@ -2054,7 +2432,11 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
   };
 
   const retryingIssueKeys = new Set<string>();
-  const retryIssue = async (wsId: string, id: string): Promise<IssueDetail> => {
+  const dispatchScheduledIssueNow = async (
+    wsId: string,
+    id: string,
+    kind: 'retry' | 'manual',
+  ): Promise<IssueDetail> => {
     const key = `${wsId}:${id}`;
     const ws = registry.get(wsId);
     if (!ws) throw new IssueRetryError('not_found', 'Workspace not found.');
@@ -2064,19 +2446,19 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       : undefined;
     if (!issue) throw new IssueRetryError('not_found', 'Issue not found.');
     if (!issue.when) {
-      throw new IssueRetryError('not_scheduled', 'Only scheduled Issues can be retried.');
+      throw new IssueRetryError('not_scheduled', 'Only scheduled Issues can be run now.');
     }
     if (issue.status === 'done' || issue.status === 'canceled') {
       throw new IssueRetryError(
         'not_fireable',
-        `This Issue is ${issue.status}; reopen it before retrying.`,
+        `This Issue is ${issue.status}; reopen it before running.`,
       );
     }
     const latest = headlessTasks.list({ issue: { workspaceId: wsId, issueId: id } })[0];
     if (latest?.status === 'running' || retryingIssueKeys.has(key)) {
       throw new IssueRetryError('already_running', 'This Issue already has a run in progress.');
     }
-    if (!latest || (latest.status !== 'failed' && latest.status !== 'interrupted')) {
+    if (kind === 'retry' && (!latest || (latest.status !== 'failed' && latest.status !== 'interrupted'))) {
       throw new IssueRetryError(
         'not_retryable',
         'Only the latest failed or interrupted scheduled run can be retried.',
@@ -2086,10 +2468,10 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     retryingIssueKeys.add(key);
     try {
       const { taskId } = await scheduleScanner.runIssueNow(wsId, id);
-      launcherLogger.info('issue.retry_dispatched', {
+      launcherLogger.info(kind === 'retry' ? 'issue.retry_dispatched' : 'issue.manual_run_dispatched', {
         wsId,
         issueId: id,
-        previousTaskId: latest.taskId,
+        previousTaskId: latest?.taskId,
         taskId,
       });
     } catch (err) {
@@ -2105,6 +2487,88 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     if (!detail) throw new IssueRetryError('not_found', 'Issue not found.');
     return detail;
   };
+  const retryIssue = async (wsId: string, id: string): Promise<IssueDetail> =>
+    dispatchScheduledIssueNow(wsId, id, 'retry');
+  const runIssueNow = async (wsId: string, id: string): Promise<IssueDetail> =>
+    dispatchScheduledIssueNow(wsId, id, 'manual');
+
+  const setSessionPresence = async (input: {
+    wsId: string
+    resumeId: string
+    presence: SessionPresence
+  }): Promise<ResumeIdentityRecord> => {
+    const identity = resumeRegistry.get(input.resumeId)
+    if (!identity) throw new ResumePresenceError('not_found', 'resume conversation not found')
+    if (identity.wsId !== input.wsId) {
+      throw new ResumePresenceError('wrong_workspace', 'resume conversation belongs to another workspace')
+    }
+    // Presence changes and launches share the same resume lease. Checking the
+    // registries without claiming first leaves a race where Archive and Resume
+    // can both pass their busy checks and commit conflicting state.
+    if (!claimResume(input.resumeId)) {
+      throw new HeadlessResumeError('busy', 'this conversation already has a running turn')
+    }
+    try {
+      await sessionRegistry.ensureLoaded(input.wsId)
+      const interactive = sessionRegistry.findByResumeId(input.wsId, input.resumeId)
+      const headless = headlessTasks.latestForResumeId(input.resumeId)
+      if (interactive?.state === 'running' || headless?.status === 'running') {
+        throw new HeadlessResumeError('busy', 'this conversation already has a running turn')
+      }
+      return await resumeRegistry.setPresence(input)
+    } finally {
+      activeResumeIds.delete(input.resumeId)
+    }
+  }
+
+  const setSessionDisplayName = async (input: {
+    wsId: string
+    resumeId: string
+    displayName: string | null
+  }): Promise<ResumeIdentityRecord> => {
+    const identity = resumeRegistry.get(input.resumeId)
+    if (!identity) throw new ResumePresenceError('not_found', 'resume conversation not found')
+    if (identity.wsId !== input.wsId) {
+      throw new ResumePresenceError('wrong_workspace', 'resume conversation belongs to another workspace')
+    }
+    return resumeRegistry.setDisplayName(input)
+  }
+
+  const deleteSessionPresence = async (input: {
+    wsId: string
+    resumeId: string
+  }): Promise<ResumeIdentityRecord> => {
+    const identity = resumeRegistry.get(input.resumeId)
+    if (!identity) throw new ResumePresenceError('not_found', 'resume conversation not found')
+    if (identity.wsId !== input.wsId) {
+      throw new ResumePresenceError('wrong_workspace', 'resume conversation belongs to another workspace')
+    }
+    // Soft-delete is one product operation even though the presence state
+    // machine deliberately requires active -> archived -> deleted. Hold the
+    // resume lease across both transitions so a launch cannot slip between
+    // them and revive a half-deleted Session.
+    if (!claimResume(input.resumeId)) {
+      throw new HeadlessResumeError('busy', 'this conversation already has a running turn')
+    }
+    try {
+      await sessionRegistry.ensureLoaded(input.wsId)
+      const session = sessionRegistry.findByResumeId(input.wsId, input.resumeId)
+      const headless = headlessTasks.latestForResumeId(input.resumeId)
+      if (session?.state === 'running' || headless?.status === 'running') {
+        throw new HeadlessResumeError('busy', 'this conversation already has a running turn')
+      }
+      let current = identity
+      if (sessionPresence(current) === 'active') {
+        current = await resumeRegistry.setPresence({ ...input, presence: 'archived' })
+      }
+      if (sessionPresence(current) !== 'deleted') {
+        current = await resumeRegistry.setPresence({ ...input, presence: 'deleted' })
+      }
+      return current
+    } finally {
+      activeResumeIds.delete(input.resumeId)
+    }
+  }
 
   const sessionDirectory = async (
     wsId: string,
@@ -2114,12 +2578,35 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     if (!ws) return null;
     await sessionRegistry.ensureLoaded(wsId);
     void refreshSessionTitles(ws);
+    const issueRead = await readWorkspaceIssues(ws.dir);
+    const rosterExclusions = issueRead.ok
+      ? connectorDeskRosterExclusions({
+          issues: issueRead.issues,
+          executionsForIssue: (issueId) => headlessTasks.list({
+            issue: { workspaceId: wsId, issueId },
+          }),
+          inquiriesForIssue: (issueId) => headlessTasks.list({
+            inquiry: { kind: 'issue', workspaceId: wsId, issueId },
+          }),
+        })
+      : new Set<string>();
+    const issueAttachments = issueRead.ok
+      ? issueRosterAttachments({
+          issues: issueRead.issues,
+          runningExecutions: headlessTasks.list({
+            wsId,
+            status: 'running',
+          }),
+        })
+      : new Set<string>();
     return buildWorkspaceSessionDirectory({
       workspace: { id: ws.id, tag: ws.tag },
       identities: resumeRegistry.list({ wsId, limit }),
       interactiveFor: (resumeId) => sessionRegistry.findByResumeId(wsId, resumeId),
       latestExecutionFor: (resumeId) => headlessTasks.latestForResumeId(resumeId),
       isActive: (resumeId) => activeResumeIds.has(resumeId),
+      rosterVisibilityFor: (resumeId) => rosterExclusions.has(resumeId) ? 'hidden' : undefined,
+      issueAttachedFor: (resumeId) => issueAttachments.has(resumeId) ? true : undefined,
     });
   };
 
@@ -2266,6 +2753,14 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
           state: 'paused',
           lastActiveAt: new Date().toISOString(),
         }).catch((err) => launcherLogger.warn('webpi.pause_update_failed', { recordId, err }));
+        void agentRuntimeLog.record('runtime.stopped', {
+          workspaceId: record.wsId,
+          resumeId: record.resumeId,
+          agent: record.agent,
+          sessionRecordId: record.id,
+          surface: 'webpi',
+          status: 'paused',
+        });
       },
     },
   );
@@ -2341,6 +2836,14 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       surface: 'webpi',
       lastActiveAt: new Date().toISOString(),
     });
+    await agentRuntimeLog.record('runtime.started', {
+      workspaceId: record.wsId,
+      resumeId: record.resumeId,
+      agent: record.agent,
+      sessionRecordId: record.id,
+      surface: 'webpi',
+      cause: { kind: 'ui' },
+    });
     return snapshot;
     } finally {
       operationLease.release();
@@ -2363,7 +2866,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     });
     const headless = headlessActivity.list(workspaceId);
     return {
-      busy: sessions.length > 0 || headless.length > 0,
+      busy: sessions.length > 0 || headless.length > 0 || harnessSurfaces.hasWorkspace(workspaceId),
       sessions,
       headless,
     };
@@ -2395,6 +2898,14 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     logger: launcherLogger.child({ scope: 'template-upgrade' }),
   });
   await templateUpgrades.recover();
+  const sourceUpgrades = new HarnessSourceUpgradeManager({
+    registry,
+    templates,
+    workspaceRuntimeActivity: workspaceRuntimeActivityMethod,
+    operationGuard: workspaceOperationGuard,
+    logger: launcherLogger.child({ scope: 'harness-source-upgrade' }),
+  });
+  await sourceUpgrades.recover();
   const workspaceAbsorbs = new WorkspaceAbsorbManager({
     registry,
     catalog,
@@ -2431,13 +2942,18 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     const harnessSource = await readHarnessSource(w.dir);
     await sessionRegistry.ensureLoaded(w.id).catch(() => undefined);
     void refreshSessionTitles(w);
-    const sessions = sessionRegistry.listFor(w.id).map((record) =>
-      projectPublicSession(record, {
+    const sessions = sessionRegistry.listFor(w.id).flatMap((record) => {
+      const identity = resumeRegistry.get(record.resumeId);
+      if (!identity || identity.lifecycle === 'retired' || sessionPresence(identity) === 'deleted') return [];
+      return [projectPublicSession(record, {
         terminal: pool.get(record.id),
         webPi: webPi.get(record.id),
-        runtimeBinding: resumeRegistry.get(record.resumeId)?.runtimeBinding,
-      }),
-    );
+        headless: activeResumeIds.has(record.resumeId),
+        runtimeBinding: identity.runtimeBinding,
+        displayName: identity.displayName,
+        presence: sessionPresence(identity),
+      })];
+    });
     // Deprecated native-project compatibility-export signals. Retained in the
     // public contract for advanced diagnostics; managed Session defaults come
     // from `runtimeSettings` and primary UI surfaces do not expose these files.
@@ -2451,7 +2967,13 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     // README frontmatter, is authoritative: changing a document is not the
     // same thing as completing a reviewed three-way upgrade.
     let currentVersion: string | undefined;
-    let upgradeAvailable: { from: string; to: string } | null = null;
+    let upgradeAvailable: {
+      from: string;
+      to: string;
+      kind?: 'template' | 'source';
+      verified?: boolean;
+      commit?: string;
+    } | null = null;
     if (w.template) {
       const tpl = templates.get(w.template);
       if (tpl) {
@@ -2462,6 +2984,29 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
           && compareVersions(tpl.version, currentVersion) > 0
         ) {
           upgradeAvailable = { from: currentVersion, to: tpl.version };
+        }
+        if (harnessSource && tpl.source) {
+          const harnessPreferences = await readHarnessPreferences();
+          const latest = await sourceUpgrades.latest(
+            tpl.name,
+            harnessSource.version,
+            harnessPreferences.showUnverifiedHarnessReleases,
+          ).catch((err) => {
+            launcherLogger.warn('harness_source_upgrade.discovery_failed', {
+              template: tpl.name,
+              err,
+            });
+            return null;
+          });
+          if (latest) {
+            upgradeAvailable = {
+              from: harnessSource.version,
+              to: latest.version,
+              kind: 'source',
+              verified: latest.verified,
+              commit: latest.commit,
+            };
+          }
         }
       }
     }
@@ -2486,20 +3031,101 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     shuttingDown = true;
     launcherLogger.info('workspaces.dispose', { reason, activeSessions: pool.size() });
     scheduleScanner.stop();
+    await harnessSurfaces.dispose();
     pool.disposeAll('plugin shutdown');
     await webPi.stopAll('plugin shutdown');
     transcriptWatcher.disposeAll();
   };
 
+  const connectorDeskOp = async (connectorId: string): Promise<ConnectorDesk | null> => {
+    const desks = await findConnectorDesks(registry.list().map((ws) => ({ id: ws.id, dir: ws.dir })), connectorId);
+    return desks[0] ?? null;
+  };
+  const createConnectorDeskOp = async (connectorId: string, wsId: string): Promise<ConnectorDesk> => (
+    serializeTelegramDeskMutation(async () => {
+      const definition = BUILTIN_CONNECTOR_DEFINITIONS.find((item) => item.id === connectorId);
+      if (!definition || !connectorDefinitionHasCapability(definition, 'desk')) {
+        const err = new Error(`Connector ${connectorId} does not advertise a phone desk`);
+        err.name = 'ConnectorDeskUnsupported';
+        throw err;
+      }
+      const workspace = registry.get(wsId);
+      if (!workspace) {
+        throw new Error(`workspace not found: ${wsId}`);
+      }
+      const workspaces = registry.list().map((ws) => ({ id: ws.id, dir: ws.dir }));
+      const created = await createConnectorDeskFile(
+        connectorId,
+        definition.label,
+        { id: workspace.id, dir: workspace.dir },
+        workspaces,
+      );
+      if (!created.ok) {
+        if (created.reason === 'conflict') {
+          const err = new Error(`${definition.label} phone desk already exists as ${created.wsId}/${created.id}`);
+          err.name = 'ConnectorDeskConflict';
+          throw err;
+        }
+        throw new Error(created.error);
+      }
+      return { wsId: workspace.id, connectorId, issue: created.issue };
+    })
+  );
+  const updateConnectorDeskOp = async (
+    connectorId: string,
+    patch: { what?: string; when?: { kind: 'every'; every: ConnectorDeskCadence } },
+  ): Promise<ConnectorDesk> => serializeTelegramDeskMutation(async () => {
+    if (patch.when && !isConnectorDeskCadence(patch.when.every)) {
+      const err = new Error(`Unsupported phone-desk cadence: ${patch.when.every}`);
+      err.name = 'ConnectorDeskInvalid';
+      throw err;
+    }
+    const desk = await connectorDeskOp(connectorId);
+    if (!desk) {
+      const err = new Error('Phone desk not found');
+      err.name = 'ConnectorDeskNotFound';
+      throw err;
+    }
+    const workspace = registry.get(desk.wsId);
+    if (!workspace) {
+      const err = new Error(`workspace not found: ${desk.wsId}`);
+      err.name = 'ConnectorDeskNotFound';
+      throw err;
+    }
+    const updated = await updateConnectorDeskFile(workspace.dir, desk.issue.id, patch);
+    if (!updated.ok) {
+      const err = new Error(updated.reason === 'invalid' ? updated.error : 'Phone desk not found');
+      err.name = updated.reason === 'not_found' ? 'ConnectorDeskNotFound' : 'ConnectorDeskInvalid';
+      throw err;
+    }
+    return { ...desk, issue: updated.issue };
+  });
+  const disableConnectorDeskOp = async (connectorId: string): Promise<ConnectorDesk | null> => (
+    serializeTelegramDeskMutation(async () => {
+      const desk = await connectorDeskOp(connectorId);
+      if (!desk) return null;
+      const workspace = registry.get(desk.wsId);
+      if (!workspace) return null;
+      const disabled = await disableConnectorDeskFile(workspace.dir, desk.issue.id);
+      if (!disabled.ok) {
+        throw new Error(disabled.reason === 'invalid' ? disabled.error : 'Phone desk could not be disabled');
+      }
+      return { ...desk, issue: disabled.issue };
+    })
+  );
+
   return {
     config,
     registry,
+    harnessSurfaces,
     catalog,
     lifecycle,
     templateUpgrades,
+    sourceUpgrades,
     workspaceAbsorbs,
     operationGuard: workspaceOperationGuard,
     sessionRegistry,
+    sessionCoordinator,
     scrollbackStore,
     templates,
     adapters,
@@ -2512,6 +3138,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     workspaceRuntimeActivity: workspaceRuntimeActivityMethod,
     resolveOrCreateChatWorkspace: resolveOrCreateChatWorkspaceMethod,
     resolveOrCreateAutoQuantWorkspace: resolveOrCreateAutoQuantWorkspaceMethod,
+    resolveOrCreateAutoPredictionWorkspace: resolveOrCreateAutoPredictionWorkspaceMethod,
     resolveDefaultAgentId,
     resolveAdapter,
     startWebPiSession,
@@ -2528,13 +3155,27 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     scheduleSnapshot,
     issuesSnapshot,
     issueDetail,
+    connectorDesk: connectorDeskOp,
+    createConnectorDesk: createConnectorDeskOp,
+    updateConnectorDesk: updateConnectorDeskOp,
+    disableConnectorDesk: disableConnectorDeskOp,
+    telegramConnectorDesk: async () => connectorDeskOp('telegram'),
+    createTelegramConnectorDesk: async (wsId: string) => createConnectorDeskOp('telegram', wsId),
+    updateTelegramConnectorDesk: async (patch) => updateConnectorDeskOp('telegram', patch),
+    disableTelegramConnectorDesk: async () => disableConnectorDeskOp('telegram'),
     retryIssue,
+    runIssueNow,
     sessionDirectory,
+    setSessionPresence,
+    setSessionDisplayName,
+    deleteSessionPresence,
     resolveIssuesByName,
     headlessTasks,
     resumeRegistry,
     provenanceStore,
     agentConversationLog,
+    agentRuntimeLog,
+    recordAgentRuntime,
     isResumeActive: (resumeId) => activeResumeIds.has(resumeId),
     claimResume,
     releaseResume: (resumeId) => activeResumeIds.delete(resumeId),
