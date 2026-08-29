@@ -16,6 +16,10 @@ services:
   openalice:
     image: ghcr.io/exynos967/openalice:latest
     container_name: openalice
+    # Stable machine identity for the Guardian runtime lock in /data. Without
+    # it Docker assigns the container ID as hostname, so every recreate looks
+    # like "another machine" and the stale lock refuses automatic takeover.
+    hostname: openalice
     restart: unless-stopped
     stop_grace_period: 30s
     ports:

@@ -104,6 +104,25 @@ docker compose up -d
 `docker compose down` preserves the named volume. `docker compose down -v` is
 a factory reset and permanently removes user data.
 
+## Stale Runtime Lock
+
+Guardian records its runtime lock at /data/workspaces/state/runtime.lock inside
+the named volume, keyed by machine identity (the container hostname). The
+Compose service pins hostname: openalice so a recreated container still owns
+its old lock and a dead owner's lock is reclaimed automatically. If a
+deployment without the pinned hostname (or a factory-reset volume) refuses to
+start with RuntimeAlreadyRunningError ("owner belongs to another machine"),
+remove the stale lock while the stack is down:
+
+```bash
+docker compose down
+docker compose run --rm --no-deps --entrypoint sh openalice \
+  -c "rm -rf /data/workspaces/state/runtime.lock"
+docker compose up -d
+```
+
+Never delete the lock while another container is healthy on the same volume.
+
 ## Backup and Restore
 
 Stop the container before taking a filesystem-consistent volume snapshot:
