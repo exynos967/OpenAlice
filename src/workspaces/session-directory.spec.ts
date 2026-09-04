@@ -59,10 +59,16 @@ describe('buildWorkspaceSessionDirectory', () => {
         output: { hasAssistantReply: true, assistantPreview: 'done', blockCount: 1, toolCalls: 0, toolFailures: 0 },
       }),
       isActive: () => false,
+      issueTitleFor: (workspaceId, issueId) => (
+        workspaceId === 'ws-1' && issueId === 'daily-market-close'
+          ? 'Daily market close review'
+          : undefined
+      ),
     })
 
     expect(result.sessions[0]).toMatchObject({
       resumeId: 'resume-kind-owl-abc123',
+      active: false,
       resumable: true,
       createdBy: {
         kind: 'issue',
@@ -73,6 +79,7 @@ describe('buildWorkspaceSessionDirectory', () => {
       },
       displayName: 'AAPL desk',
       runtime: { credentialSource: 'vault', credentialSlug: 'secret-slug', model: 'gpt-5.6-terra', reasoningEffort: 'high' },
+      presentationTitle: 'Daily market close review',
       interactive: { name: 'c1', title: 'Investigate provenance' },
       latestExecution: { taskId: 'task-1', assistantPreview: 'done' },
     })
@@ -128,6 +135,40 @@ describe('buildWorkspaceSessionDirectory', () => {
     })
 
     expect(result.sessions[0]?.interactive).toBeUndefined()
+    expect(result.sessions[0]?.active).toBe(false)
+  })
+
+  it('keeps a running interactive Session awake without requiring a headless execution', () => {
+    const result = buildWorkspaceSessionDirectory({
+      workspace: { id: 'ws-1', tag: 'research' },
+      identities: [{
+        resumeId: 'resume-interactive',
+        wsId: 'ws-1',
+        agent: 'grok',
+        createdAt: 1,
+        updatedAt: 2,
+        lifecycle: 'active',
+      }],
+      interactiveFor: () => ({
+        id: 'grok-session',
+        resumeId: 'resume-interactive',
+        wsId: 'ws-1',
+        agent: 'grok',
+        name: 'g1',
+        createdAt: '2026-08-30T00:00:00.000Z',
+        lastActiveAt: '2026-08-30T00:01:00.000Z',
+        state: 'running',
+        surface: 'terminal',
+      }),
+      latestExecutionFor: () => null,
+      isActive: () => false,
+    })
+
+    expect(result.sessions[0]).toMatchObject({
+      resumeId: 'resume-interactive',
+      active: true,
+      interactive: { state: 'running' },
+    })
   })
 
   it('projects archived presence and keeps a deleted Session non-resumable', () => {

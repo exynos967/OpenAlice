@@ -145,6 +145,7 @@ beforeEach(async () => {
   resetAgentRuntimesStore()
   await i18n.changeLanguage('en')
   delete scheduledIssue.issue.automationHealth
+  delete scheduledIssue.assigneeSession
   delete scheduledIssue.issue.credential
   delete scheduledIssue.issue.model
   delete scheduledIssue.issue.effort
@@ -341,7 +342,7 @@ describe('IssueActivity provenance identity', () => {
 
     expect(screen.queryByRole('button', { name: 'Continue' })).toBeNull()
     fireEvent.click(screen.getByRole('button', {
-      name: 'Show Session details for opencode · resume-open-coral-harbor-j76vuu',
+      name: 'Show Session details for opencode, resume-open-coral-harbor-j76vuu',
     }))
     expect(onOpenSession).not.toHaveBeenCalled()
     expect(screen.getByRole('dialog', {
@@ -354,7 +355,7 @@ describe('IssueActivity provenance identity', () => {
     })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', {
-      name: 'Show Session details for opencode · resume-open-coral-harbor-j76vuu',
+      name: 'Show Session details for opencode, resume-open-coral-harbor-j76vuu',
     }))
     fireEvent.click(screen.getByRole('button', { name: 'Open conversation' }))
     await waitFor(() => expect(onOpenSession).toHaveBeenCalledWith(expect.objectContaining(record)))
@@ -462,30 +463,30 @@ describe('IssueDetail property controls', () => {
   it('confirms a bound Session capability change without rewriting Issue frontmatter', async () => {
     scheduledIssue.issue.assignee = '@resume-kind-owl-abc123'
     delete scheduledIssue.issue.agent
-    mocks.getWorkspaceSessionDirectory.mockResolvedValue({
-      sessions: [{
-        resumeId: 'resume-kind-owl-abc123',
-        agent: 'codex',
-        createdAt: Date.now() - 86_400_000,
-        updatedAt: Date.now() - 60_000,
-        resumable: true,
-        active: false,
-        runtime: {
-          credentialSource: 'native',
-          model: 'claude-sonnet-4-5',
-          reasoningEffort: 'high',
-        },
-      }],
-    })
+    scheduledIssue.assigneeSession = {
+      resumeId: 'resume-kind-owl-abc123',
+      state: 'ready',
+      workspace: { id: 'demo-ws-remote', tag: 'remote' },
+      agent: 'codex',
+      displayName: 'Remote researcher',
+      active: false,
+      runtime: {
+        credentialSource: 'native',
+        model: 'claude-sonnet-4-5',
+        reasoningEffort: 'high',
+      },
+    }
+    mocks.getWorkspaceSessionDirectory.mockResolvedValue({ sessions: [] })
 
     render(<IssueDetail wsId="demo-ws-auto-quant" id="morning-scan" />)
 
     const trigger = await screen.findByRole('button', { name: 'AI configuration' })
     await waitFor(() => expect((trigger as HTMLButtonElement).disabled).toBe(false))
     expect(trigger.textContent).toContain('Runtime managed')
-    expect(trigger.textContent).toContain('claude-sonnet-4-5 · high')
+    expect(trigger.textContent).toContain('claude-sonnet-4-5, high')
     expect(screen.queryByRole('combobox', { name: 'Runtime' })).toBeNull()
     expect(screen.getByText('codex')).toBeTruthy()
+    expect(screen.queryByText('This bound Session is no longer available.')).toBeNull()
 
     fireEvent.click(trigger)
     expect(screen.queryByRole('checkbox', { name: 'Follow Workspace headless preference' })).toBeNull()
@@ -501,7 +502,7 @@ describe('IssueDetail property controls', () => {
     fireEvent.click(within(confirm).getByRole('button', { name: 'Change capabilities' }))
 
     await waitFor(() => expect(mocks.updateResumeRuntime).toHaveBeenCalledWith(
-      'demo-ws-auto-quant',
+      'demo-ws-remote',
       'resume-kind-owl-abc123',
       {
         credentialSource: 'native',
@@ -770,13 +771,13 @@ describe('IssueDetail property controls', () => {
 
     expect(activeIndex).toBeGreaterThanOrEqual(0)
     expect(recentIndex).toBeGreaterThan(activeIndex)
-    expect(choices[activeIndex]?.textContent).toContain('resume-active-owner · pi · active')
-    expect(choices[recentIndex]?.textContent).toContain('resume-recent-worker · codex')
+    expect(choices[activeIndex]?.textContent).toContain('resume-active-owner, pi, active')
+    expect(choices[recentIndex]?.textContent).toContain('resume-recent-worker, codex')
 
     fireEvent.click(choices[activeIndex]!)
     expect(mocks.updateIssue).not.toHaveBeenCalled()
     expect(within(dialog).getByText('Pending assignment')).toBeTruthy()
-    expect(within(dialog).getByText('resume-active-owner · pi · active now')).toBeTruthy()
+    expect(within(dialog).getByText('resume-active-owner, pi, active now')).toBeTruthy()
     fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm assignment' }))
     await waitFor(() => expect(mocks.updateIssue).toHaveBeenCalledWith(
       'demo-ws-auto-quant',

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { HeadlessTaskRecord } from '../../api/headless'
 import { i18n } from '../../i18n'
 import type { AgentInfo, SessionRecord, Workspace } from './api'
 import { SessionRow, WorkspaceRow } from './Sidebar'
@@ -134,6 +135,55 @@ describe('WorkspaceRow session launcher', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Offboard workspace' }))
     expect(onDelete).toHaveBeenCalledWith(workspace.id)
   })
+
+  it('presents headless Issue work by business identity and opens it with a clean title', () => {
+    const onOpenHeadlessRun = vi.fn()
+    const run: HeadlessTaskRecord = {
+      taskId: 'run-daily-risk-scan',
+      resumeId: 'resume-daily-risk-scan',
+      resumable: true,
+      wsId: workspace.id,
+      agent: 'codex',
+      prompt: 'Reconstruct the Issue context, inject target JSON, and continue.',
+      status: 'done',
+      startedAt: Date.now() - 1_000,
+      trigger: {
+        kind: 'issue',
+        workspaceId: workspace.id,
+        issueId: 'daily-risk-scan',
+      },
+    }
+
+    render(
+      <WorkspaceRow
+        workspace={workspace}
+        agents={agents}
+        defaultAgent="pi"
+        selection={null}
+        headlessTasks={[run]}
+        onSelectWorkspace={vi.fn()}
+        onSelectSession={vi.fn()}
+        onSpawn={vi.fn()}
+        onOpenHeadlessRun={onOpenHeadlessRun}
+        onPauseSession={vi.fn()}
+        onResumeSession={vi.fn()}
+        onDeleteSession={vi.fn()}
+        onDelete={vi.fn(async () => undefined)}
+      />,
+    )
+
+    expect(screen.queryByText(run.prompt)).toBeNull()
+    fireEvent.click(screen.getByTitle('Headless runs (automation)'))
+    expect(screen.getByText('Daily Risk Scan')).toBeTruthy()
+    expect(screen.queryByText(run.prompt)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open this run as an interactive session' }))
+    expect(onOpenHeadlessRun).toHaveBeenCalledWith(
+      workspace.id,
+      run.resumeId,
+      { title: 'Daily Risk Scan' },
+    )
+  })
 })
 
 describe('SessionRow actions', () => {
@@ -219,6 +269,7 @@ describe('SessionRow actions', () => {
     expect(more.getAttribute('aria-haspopup')).toBe('menu')
     more.focus()
     await user.keyboard('{ArrowDown}')
+    expect(screen.getByRole('menuitem', { name: 'Stop Review AAPL earnings' })).toBeTruthy()
     fireEvent.click(screen.getByRole('menuitem', { name: 'Settings for Review AAPL earnings' }))
     expect(onSettings).toHaveBeenCalledOnce()
 
@@ -245,7 +296,10 @@ describe('SessionRow actions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Resume p1' }))
     expect(onResume).toHaveBeenCalledOnce()
-    expect(screen.getByRole('button', { name: 'More actions for p1' })).toBeTruthy()
+    const pausedMore = screen.getByRole('button', { name: 'More actions for p1' })
+    pausedMore.focus()
+    await user.keyboard('{ArrowDown}')
+    expect(screen.getByRole('menuitem', { name: 'Resume p1' })).toBeTruthy()
   })
 
   it('marks the active session as the current page', () => {

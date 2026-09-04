@@ -19,6 +19,9 @@ Owner guides:
 - [[docs/data-locations.md]]
 - [[docs/workspace-lifecycle.md]]
 - [[docs/conversation-provenance.md]]
+- [[docs/model-semantics-and-runtime-injection.md]]
+- [[docs/workspace-issues-and-scheduling.md]]
+- [[docs/broker-packs.md]]
 - [[docs/managed-workspace-runtime.md]]
 - [[docs/development-workflow.md]]
 
@@ -28,6 +31,9 @@ Related active plan:
   lifecycle core, installer-managed Runtime, update model, and terminal
   acceptance. This plan owns the new machine fleet, remote AliceProject
   inventory, transfer transaction, and the TUI flows built on those services.
+- [[plans/bun-cli-distribution.md]] owns the native CLI artifact and installer
+  used by managed SSH. This plan owns the AliceProject content/credential
+  transaction and controller/remote release relation.
 
 ## Objective
 
@@ -43,6 +49,13 @@ machines:
   loopback transport;
 - copy a local AliceProject's portable configuration and Workspace estate to a
   new remote complete home through a reviewable, resumable transaction;
+- negotiate one OpenAlice release graph across independently activated local
+  and remote Runtimes, so a current controller may deliberately advance an
+  older remote while an older controller can never downgrade or mutate a newer
+  remote;
+- keep the browser truthful after attaching to a remote Runtime: connection,
+  AliceProject authority, Agent availability, Broker Pack availability, and
+  recovery state remain distinct instead of collapsing into one green status;
 - deliberately exclude native Agent conversations and OpenAlice Session
   continuation state, so the remote AliceProject starts with zero resumable
   Sessions while retaining its Workspace repositories and Workspace ids.
@@ -232,9 +245,13 @@ The default transfer includes:
 - AliceProject product birth (`trader` or `nano`);
 - portable product configuration and preferences under `data/`, subject to the
   exclusions and credential rules below;
-- active Workspace repositories, departed Workspace repositories, Git
-  metadata, uncommitted files, `.alice/settings.json`, Issues, comments,
-  Harness receipts, handoff artifacts, and other Workspace-owned files;
+- active Workspace repositories, departed Workspace repositories, portable Git
+  object/ref/index state, tracked files, and nonignored untracked files.
+  Ignored generated dependencies are omitted; linked worktrees, initialized
+  submodules/nested repositories, alternates, and promisor/partial-clone state
+  block transfer until the Workspace is materialized independently;
+- `.alice/settings.json`, Issues, comments, Harness receipts, handoff artifacts,
+  and other portable Workspace-owned files;
 - active Workspace registry and lifecycle Catalog semantics, reconstructed
   with remote absolute paths;
 - Inbox, trading history/snapshots, schedules, UI layout, and other portable
@@ -300,14 +317,16 @@ SSH encrypts transport, but that does not make every secret portable.
 
 - AI provider credentials owned by the selected complete home may transfer
   after the plan reports only their count/vendors and obtains confirmation.
-  Values travel only over the SSH process pipe and are never printed.
+  This includes the current credential records and supported legacy flat API
+  keys. Values are read once into the consented process-private snapshot,
+  travel only over the SSH process pipe, and are never printed.
 - An `OPENALICE_GLOBAL_DIR` outside the complete home remains user-global and
   is never traversed implicitly. The plan reports that those credentials stay
   on the source machine.
 - Broker account and Connector credentials are decrypted in source-process
   memory, sent through the authenticated SSH stdin channel, and sealed on the
   remote machine with a newly generated destination `sealing.key`.
-- Plaintext credential material never enters the archive, argv, environment,
+- Plaintext credential material never enters the portable file frames, argv, environment,
   logs, progress events, plan JSON, staging files, or test snapshots.
 - The source `sealing.key` is never copied. The destination key is mode `0600`
   and is created only by the remote importer.
@@ -327,6 +346,8 @@ Do not transfer:
 - local Supervisor registry/default selection or source `appDir`;
 - local machine logs, migration scratch files, update state, or installer
   content;
+- user-owned Agent Runtime executables, login/session stores, native config,
+  caches, and plugin state; shared portable Workspace skills remain eligible;
 - web/admin login sessions;
 - symlinks or archive entries that escape the declared source roots;
 - an externally overridden `AQ_LAUNCHER_ROOT` without a future explicit
@@ -354,12 +375,12 @@ are regenerated from destination configuration before first launch.
 7. Obtain consent for the exact manifest and any credential/session-owner
    policy. Re-probe before mutation so stale plans cannot overwrite new state.
 8. Create an owner-private sibling staging directory on the remote host and a
-   durable transaction receipt containing no secrets.
-9. Stream a versioned archive through SSH stdin. Use a Node archive library in
-   the standalone CLI rather than depending on GNU/BSD `tar` flag parity.
-   Validate entry type, normalized relative path, declared root, size bounds,
-   and symlink containment during receive.
-10. Stream credential frames separately from the archive and re-seal directly
+  durable transaction receipt containing no secrets.
+9. Stream a versioned, bounded file protocol through SSH stdin without a host
+   `tar` dependency. Validate entry order/type, normalized relative path,
+   declared root, size bounds, per-file checksum, and symlink containment
+   during receive.
+10. Stream credential frames separately from portable file frames and re-seal directly
     into destination files without plaintext staging.
 11. Verify file count, byte count, per-entry or content-tree SHA-256, product
     stamp, Workspace registry/catalog reconstruction, permissions, and the
@@ -371,9 +392,11 @@ are regenerated from destination configuration before first launch.
 13. Run read-only destination Doctor/inventory checks. Runtime start and tunnel
     open are separate post-transfer actions offered by CLI/TUI.
 14. On interruption, leave a bounded staging receipt. A retry with the same
-    manifest resumes verified chunks when supported or safely replaces only
-    that transaction's staging directory. Cleanup never targets an unresolved
-    path or another transaction.
+    manifest safely replaces only that transaction's staging directory. If
+    publish succeeded but registry registration failed, retry verifies the
+    exact published tree and credential bundle before idempotently repairing
+    registration. Cleanup never targets an unresolved path or another
+    transaction.
 
 The local source remains byte-for-byte untouched except for an explicitly
 approved graceful stop. A successful transfer report includes the remote
@@ -389,7 +412,7 @@ Keep the implementation split into presentation-neutral modules under
 - machine config parser/store;
 - fleet inventory types and local/SSH probes;
 - transfer inventory and policy planner;
-- versioned manifest and archive filter;
+- versioned manifest and framed-stream filter;
 - source exporter and secret-frame producer;
 - remote staging/import transaction and secret re-sealer;
 - connection/tunnel service that reuses existing `remote.mjs` behavior;
@@ -405,6 +428,92 @@ return effects; effects call the same services as explicit commands.
 The remote importer is the only writer for a transfer staging home. Guardian
 remains the only Runtime writer. Transfer never invents another Runtime lock,
 signals a guessed PID, exposes the Guardian socket, or performs trading writes.
+
+## Remote Release Negotiation
+
+The controller and remote Runtime activate versions independently but consume
+the same release authority. Opening a tunnel must not silently align them, and
+the remote must not run a background updater merely because it is registered
+in the fleet. The controller owns comparison, plan presentation, and consent;
+the destination's deployment owner verifies, installs, atomically activates,
+and falls back.
+
+Release comparison uses logical and artifact identities rather than a displayed
+version string alone:
+
+- stable and beta use channel plus exact release version, then validate the
+  destination platform's archive checksum and content identity;
+- dev uses the latest completed dev manifest commit plus the local and remote
+  platform targets from that one manifest. The reused package version does not
+  order dev builds;
+- control protocol range and capabilities are negotiated separately from
+  release order. A newer release is not assumed compatible merely because its
+  version sorts higher.
+
+The plan classifies every connection before proposing a mutation:
+
+| Relation | Required behavior |
+|---|---|
+| `aligned` | Reuse the compatible Runtime and open the loopback tunnel without mutation. |
+| `remote-behind` | Show the exact release/artifact target and Runtime interruption; after explicit consent, ask the destination deployment owner to upgrade, then re-probe before tunneling. |
+| `controller-behind` | Never downgrade the remote. Permit compatible read-only status/tunneling, but block install, start, stop, restart, takeover, or update until the controller upgrades. |
+| `channel-conflict` | Do not infer ordering across stable, beta, and dev. Require an explicit channel-switch intent before any release mutation. |
+| `incompatible` | Fail closed with the required controller or remote upgrade; do not guess a PID, selector, or fallback. |
+
+Managed SSH uses one apply authority: after explicit consent, the controller
+invokes the ordinary installer with the verified logical release and the
+remote platform's exact artifact identity. OpenAlice does not discover or call
+a cloud provider, deployment API, container manager, or service lifecycle.
+Rolling dev is checked only when the user requests connection or upgrade; no
+background polling or hot-update loop is added.
+
+## Browser Remote Readiness and Recovery
+
+Remote readiness is a layered projection, not one `remoteReady` boolean:
+
+| Layer | Authority | User-visible meaning |
+|---|---|---|
+| Connection | Browser connection context plus backend auth probe | The local page can currently reach this remote OpenAlice Runtime. |
+| Environment | Version info, AliceProject identity, and deployment authority | Which Project and release are running, and whether CLI, desktop, or a deployment service owns lifecycle and updates. |
+| Agent capability | Fresh executable discovery plus an optional explicit readiness probe | A particular native Agent Runtime is installed; separately, whether the user chose to run a potentially credentialed probe. |
+| Broker capability | Alice-owned account configuration joined with machine-local Broker Pack status | A configured account has the local integration required to become operational on this server. |
+
+Rules:
+
+- A missing Agent Runtime or Broker Pack does not make the SSH tunnel or core
+  OpenAlice Runtime unhealthy. It blocks only the schedule, Session launch,
+  account read, reconnect, or trading action that depends on that capability.
+- Cheap rediscovery may run on focus, visibility restoration, and backend
+  recovery. It must never silently run a native Agent, test credentials,
+  install software, contact a broker, or submit an order.
+- Fresh executable presence and path always outrank a cached probe row. When an
+  executable appears, disappears, or moves, the active-probe result becomes
+  `unknown` until the user explicitly checks it.
+- Scheduled Issue health resolves the effective Agent first. A missing exact
+  Session Runtime or fresh-run override is `blocked` with a stable reason code,
+  not `healthy` or `not_started`; installation makes the read-side projection
+  recover without rewriting the Issue.
+- A transferred account whose Pack is absent is "configured, support needed",
+  never "no account" and never Live. Historical snapshots may remain visible
+  only when clearly marked stale. Reconnect, order entry, position close, and
+  deep-linked order forms stay gated until Pack, account reachability,
+  permissions, and trading mode all allow the action.
+- Healthy browser chrome shows the SSH target, local tunnel, remote Runtime
+  endpoint, current AliceProject, and lifecycle/update owner. A remote Data
+  Home must not recommend local `openalice start` or `pnpm dev` commands.
+- The full CLI-issued client URL is the authority for establishing browser-side
+  SSH identity; same-tab reload must retain it. A scrubbed bare origin cannot
+  be asserted as a particular SSH target unless a bounded, backend-validated
+  origin context exists. Stale target labels are worse than generic recovery
+  guidance.
+- Recoverable transport loss keeps the page mounted. Backend recovery advances
+  a shared generation and causes stale domain reads and recoverable terminal
+  sockets to retry. Authentication, ownership conflict, and terminal-not-found
+  close codes remain explicit and never auto-take over or create a replacement.
+- Public Session and Automation titles use business provenance already present
+  in Issue/conversation/headless metadata. Delivered reconstruction wrappers,
+  raw target JSON, and scheduled instructions remain diagnostic detail and are
+  never the collapsed-row or Session display name.
 
 ## Ordered Delivery
 
@@ -467,8 +576,8 @@ signals a guessed PID, exposes the Guardian socket, or performs trading writes.
 - [x] Add source/destination quiescence and ownership checks with isolated
   consent for source stop; refuse foreign owners and occupied destinations.
 - [x] Stream configuration and Workspace trees into owner-private remote
-  staging with bounded input, safe archive extraction, checksums, and durable
-  receipts.
+  staging with bounded framed input, normalized paths, checksums, safe
+  symlinks, and durable receipts.
 - [x] Rebase active/departed Workspace registry and Catalog paths while
   preserving Workspace ids, tags, lifecycle, Git state, and files.
 - [x] Exclude the complete Session/runtime/auth plane and verify the destination
@@ -479,7 +588,8 @@ signals a guessed PID, exposes the Guardian socket, or performs trading writes.
   with a new destination key; prove plaintext never reaches archive, argv,
   env, logs, progress, or fixture snapshots.
 - [x] Atomically publish and register the destination project; implement safe
-  retry/cancel/cleanup for only the resolved transaction staging path.
+  retry/cancel/cleanup for only the resolved transaction staging path, plus
+  exact-tree verification before repairing a post-publish registration retry.
 - [x] Add `openalice project transfer ... --plan|--yes`, concise human progress,
   and a stable machine-readable result.
 - [x] Extend the disposable Docker SSH acceptance through plan, default-no,
@@ -527,6 +637,82 @@ signals a guessed PID, exposes the Guardian socket, or performs trading writes.
 - [ ] Delete this plan and its [[PLANS.md]] bullet only after every acceptance
   criterion is repository truth and the maintainer accepts the completed
   product behavior.
+
+### Increment 6 — SSH transfer hardening
+
+- [x] Make Workspace inclusion Git-aware: preserve tracked and nonignored
+  untracked content plus self-contained Git state, exclude ignored generated
+  dependencies, and fail closed on linked/nested/alternate/promisor layouts.
+- [x] Freeze Alice-owned AI/broker/Connector/provider credentials once at plan
+  consent, keep them out of plan JSON and portable file frames, and re-seal
+  them under a new destination key.
+- [x] Validate the complete receipt and exact published entry set before an
+  idempotent registration retry, including receiver-created credential files.
+- [x] Apply the reviewed transfer to a retained SSH host, select the imported
+  Project, and verify portable Workspace/configuration state plus a new
+  user-owned Agent Runtime turn without importing native Session state.
+
+### Increment 7 — controller-driven remote release convergence
+
+- [x] Audit managed SSH release authority, dev-manifest selection,
+  target-specific artifact identity, and stale-controller behavior; record the
+  chosen relation model in this plan.
+- [ ] Add one typed release-relation result shared by raw-target Remote, fleet
+  inventory/detail, CLI plans, and Supervisor TUI presentation.
+- [ ] Preserve the existing latest-dev-controller gate and add directional
+  stable/beta comparison so an older controller cannot downgrade a newer
+  remote. Cross-channel changes remain an explicit separate intent.
+- [ ] Keep compatible read-only status/tunnel access available when the
+  controller is behind, while blocking every remote lifecycle or release
+  mutation with actionable local-upgrade guidance.
+- [ ] When the remote is behind, show the exact install/restart/PTY impact,
+  require consent, invoke the normal SSH installer, and wait for a bounded
+  target-identity/readiness re-probe.
+- [ ] Treat transport loss, owner replacement, install failure, and readiness
+  timeout as non-convergence. Report the verified running release and never
+  claim that the remote upgraded.
+- [ ] Add focused managed-SSH, dev-manifest, stale-controller, cross-channel,
+  consent/default-No, and post-install identity tests. Extend the disposable
+  Docker SSH journey without exposing a public Web port.
+- [ ] Update `docs/remote-access.md`, `docs/docker-deployment.md`, CLI help, and
+  Supervisor wording with the shipped apply authority and downgrade rules.
+
+### Increment 8 — remote readiness and browser truth
+
+This increment supplied the beta3 remote-readiness boundary; the recovery
+journey's Settings identity fix follows on `dev` after that release. It remains
+independent of the unfinished Increment 7 release-apply work and does not grant
+the SSH path deployment authority or broaden Agent/broker ownership.
+
+- [x] Reconcile Agent readiness from fresh PATH discovery, expose a cheap
+  rediscovery action distinct from active probing, and refresh on focus,
+  visibility restoration, and backend recovery without spawning an Agent.
+- [x] Project effective Agent availability into scheduled Issue health with a
+  stable `agent_runtime_missing` blocker and recover it after installation.
+- [x] Join configured trading accounts to Broker Pack readiness in one
+  Alice-owned contract and one UI domain hook. Propagate the result through
+  Trading, Portfolio, account detail, reconnect, order entry, and position-close
+  actions; preserve configured disabled state and never contact a real broker in
+  acceptance.
+- [x] Add healthy remote identity and deployment-owned Data Home guidance.
+  Preserve full-client-URL and same-tab reload identity, and make any cross-tab
+  reuse bounded and backend-validated before presenting it as current truth.
+- [x] Make recoverable terminal reconnect survive outages beyond the current
+  retry budget, add an explicit retry for closed terminals, and retain fatal
+  auth/ownership/not-found behavior.
+- [x] Reuse the existing Issue/Headless Session presentation projection across
+  Workspaces and Automation, including historical read-side presentation and
+  "Open as session". Unify sidebar/card timestamps on latest activity rather
+  than unlabeled Workspace creation time.
+- [x] Add an authoritative Issue assignee-Session projection so a newly claimed
+  or cross-Workspace owner cannot coexist with a stale "Session is no longer
+  available" warning.
+- [x] Extend the Docker SSH journey with dynamic free Runtime discovery,
+  missing-Pack account projection, complete client URL retention, and a real
+  shell PTY tunnel reconnect. Cover the longer logical retry window with fake
+  timers and run one retained SSH long-outage journey for beta acceptance.
+- [x] Update the remote access, Agent/runtime, scheduling, Broker Pack, and
+  Docker owner guides with the shipped layered-readiness contract.
 
 ## Verification Matrix
 
@@ -603,6 +789,86 @@ retry after transfer failure, and proves Escape cancellation aborts the active
 sender. README already links the remote quickstart, so no public positioning
 rewrite is needed.
 
+Increment 6 local progress (2026-08-31): the planner now preserves tracked and
+nonignored untracked Workspace content while rejecting Git layouts that depend
+on machine-local worktree, nested repository, alternate-object, or promisor
+state. Alice-owned credentials are frozen in a process-private consent
+snapshot, streamed separately from portable files, and re-sealed at the
+destination; native Agent login/config/session state remains excluded. Receipt
+validation covers the exact manifest, credentials policy, and published entry
+set, including idempotent recovery when the receiver created an AI vault before
+registry registration failed. Disposable SSH apply and real Project selection
+were the acceptance step shared with the Bun CLI distribution plan.
+
+Increment 6 hosted acceptance (2026-09-01): the stopped local Default
+AliceProject transferred through the production SSH path into
+`/data/projects/main-cloud` on the retained remote volume. The destination
+published 10,702 files and 222,635,304 bytes, registered and selected its new
+AliceProject identity, retained portable Workspace/configuration state, copied
+no native Sessions, and left transfer staging clean. OpenCode 1.18.25 was then
+installed as user-owned persistent state outside the OpenAlice release, and
+Workspace `chat-solid-coral-ridge` completed a real headless turn returning
+`OPENALICE_REMOTE_OK`. The local source remains stopped to avoid divergent
+writes.
+
+Increment 8 discovery evidence (2026-09-01): a real retained-SSH browser
+journey proved that the core SSH/backend recovery path survives a short outage,
+but optional capability and presentation state is not yet truthful. Pi appeared
+only after an explicit probe because cached `not_installed` overrode fresh PATH
+discovery; four Grok schedules said their schedule was valid while Grok was
+missing; six configured trading accounts collapsed to "No trading accounts
+connected", while Alpaca still showed a green indicator, stale equity, enabled
+Reconnect, and an order-entry dialog despite its missing Pack. Healthy Settings
+omitted the SSH target and advised local start commands for a remote
+Data Home. A copied scrubbed URL lost remote recovery identity, while the full
+CLI-issued URL retained exact target and port guidance. Workspaces and
+Automation exposed reconstruction wrappers/raw target JSON as public titles,
+and one polled Issue owner briefly coexisted with a stale unavailable-Session
+directory. A deliberate tunnel cut restored both open pages automatically;
+the remaining terminal retry budget beyond roughly 85 seconds is a separate
+component recovery gap. No Agent was started, no Connector message was sent,
+and no broker call or order submission occurred.
+
+Increment 8 implementation evidence (2026-09-01): layered Agent, Issue,
+Session, connection, Terminal, and per-account Broker Pack projections now use
+their owning authorities and fail closed only on dependent actions. Targeted
+tests cover binary-identity cache invalidation, GET-only rediscovery,
+structured schedule blockers, authoritative cross-Workspace owners, public
+title projection, long terminal retry exhaustion, and trading-mode/health/write
+gates. The disposable OrbStack Linux arm64 SSH journey passed both its ordinary
+and full TUI paths: an inert Pi shim was discovered and removed without ever
+executing, and a migrated Alpaca account stayed configured but non-operational
+with its Pack missing.
+
+Increment 8 release acceptance (2026-09-01): public `v0.91.0-beta.3` replaced
+beta2 on the retained SSH service through an operator-managed restart. The accepted Runtime preserved the
+same `/data/projects/main-cloud` AliceProject, six Workspace directories, Pi,
+OpenCode, and ready Alice/UTA/Connector components. A real shell PTY kept PID
+893 while a 120-second command crossed a tunnel outage longer than the terminal
+retry budget. Replacing only the local tunnel made the existing browser page
+recover automatically and reattach that exact PTY without clicking Retry or
+reloading. The journey also found one read-side recovery bug: About retained
+the old Runtime version and Project source after owner replacement. Version and
+AliceProject domain hooks now invalidate outage-era requests, refetch on the
+shared backend-recovery generation, and ignore late stale responses. Confirmed
+snapshots are valid only for their recovery generation, so a failed recovery
+read shows unavailable instead of reviving the old owner; version reads also
+abort when the transport disappears. The source UI repeated the real SSH
+tunnel cut while staying on Settings;
+proxy evidence recorded fresh `/api/version` and `/api/alice-project` reads,
+and the visible beta3 Runtime source remained correct after automatic recovery.
+
+Increment 8 review follow-up (2026-09-01): a read-only recovery-state review
+found six races that isolated happy-path tests had missed. Broker readiness now
+invalidates old operational data on refresh failure or backend loss and reloads
+on backend recovery; Trading status/equity polling starts and stops with the
+same readable-account gate. Terminal retry history resets only after the
+authoritative `attached` frame, Agent inventory rediscovers on backend recovery,
+scheduled health reuses the assignee Session projection so a missing Workspace
+cannot appear ready, and in-flight Agent probes are shared only for the same
+executable path and fingerprint. Combined focused tests cover all six cases;
+the full repository/package and retained SSH gates remain below.
+
 Always:
 
 ```bash
@@ -617,7 +883,7 @@ Machine/fleet increment:
 
 ```bash
 pnpm vitest run packages/cli/src/<machine-and-inventory-specs>
-pnpm test:remote:docker
+pnpm test:system:remote
 ```
 
 TUI increments:
@@ -632,8 +898,8 @@ pnpm vitest run \
 Distributed transfer increment:
 
 ```bash
-pnpm test:remote:docker
-pnpm test:install:docker
+pnpm test:system:remote
+pnpm test:system:installer
 CSC_IDENTITY_AUTO_DISCOVERY=false pnpm electron:smoke:workspace
 ```
 
@@ -642,15 +908,15 @@ Targeted security/transaction tests cover:
 - malformed/unknown/newer machine registry schemas and atomic-write failure;
 - SSH host-key/auth/timeout/connection-loss classes without disabling
   verification;
-- hostile machine keys, targets, remote homes, archive paths, control bytes,
+- hostile machine keys, targets, remote homes, manifest paths, control bytes,
   oversized entries, symlink escapes, and destination collisions;
 - source/destination Runtime races between plan and apply;
 - dirty Git repositories, submodules, executable files, Unicode names, empty
   files, large files, and interrupted streams;
-- Session paths and global Agent homes absent from the archive/destination;
+- Session paths and global Agent homes absent from the stream/destination;
 - exact-Session Issues under both explicit policies;
 - synthetic AI/broker/Connector secrets absent from every stdout/stderr/log,
-  manifest, archive, receipt, error, and snapshot while destination unsealing
+  manifest, portable file frames, receipt, error, and snapshot while destination unsealing
   succeeds with a distinct key;
 - checksum mismatch, publish/register failure, retry, cancellation, bounded
   cleanup, and source byte-for-byte preservation.
@@ -679,6 +945,16 @@ normal `~/.openalice`.
   machine-bound data with a distinct remote key.
 - Exact-Session scheduled Issues are never silently reassigned; the chosen
   policy is visible in plan and result.
+- Missing Agent Runtimes and Broker Packs block only their dependent features,
+  recover through cheap rediscovery, and never appear as a healthy schedule,
+  absent configured account, Live broker, or available trading action.
+- Healthy and offline browser states identify a CLI-issued SSH attachment
+  truthfully; deployment-owned homes never receive local lifecycle guidance.
+- Recoverable SSH outages restore domain reads and terminal sockets without
+  starting a replacement Agent, taking ownership, or losing the current page.
+- Workspaces, Sessions, and Automation use business-facing provenance for
+  public titles and latest activity; internal reconstruction prompts and raw
+  target JSON remain diagnostic-only.
 - Interrupted or failed transfer never publishes a partial home, overwrites an
   existing project, mutates an unrelated path, or changes source project data.
 - TUI narrow/wide layouts, scrolling, cancellation, disconnect, resize, and

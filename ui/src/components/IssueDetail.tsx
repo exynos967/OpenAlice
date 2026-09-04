@@ -8,6 +8,7 @@ import type { HeadlessTaskStatus, HeadlessTurnProgress } from '../api/headless'
 import type { InboxEntry } from '../api/inbox'
 import type {
   IssueDetail as IssueDetailData,
+  IssueAssigneeSession,
   IssueDetailIssue,
   IssuePatch,
   IssueActivityRecord,
@@ -23,7 +24,6 @@ import { DEFAULT_ISSUE_COMMENT_PROMPT, ISSUE_TIMEOUTS, issuesApi } from '../api/
 
 import {
   getAgentReadiness,
-  getWorkspaceSessionDirectory,
   listAgentCredentials,
   updateResumeRuntime,
   type AgentCredentialReadiness,
@@ -41,6 +41,7 @@ import {
   usePinnedRuntimeDraft,
 } from '../hooks/usePinnedRuntimeDraft'
 import { useIssueDetail } from '../hooks/useIssueDetail'
+import { useWorkspaceSessionDirectory } from '../hooks/useWorkspaceSessionDirectory'
 import { useWorkspaces } from '../contexts/workspaces-context'
 import { formatRelativeTime } from '../lib/intl'
 import { useInboxRead } from '../live/inbox-read'
@@ -67,6 +68,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
+import { SelectionCheckIcon } from '@/components/ui/selection-check-icon'
 import { resolveIssueAiSelection } from './issue-runtime-options'
 
 // Run-status pill tints — mirrors AutomationRunsSection's STATUS_STYLE so the
@@ -116,7 +118,7 @@ function InspectorField({
 }) {
   return (
     <div className={`min-w-0 space-y-1.5 ${className}`}>
-      <span className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+      <span className="flex items-center gap-1.5 text-[11px] leading-[15px] font-medium text-muted-foreground">
         {icon}
         {label}
       </span>
@@ -136,7 +138,7 @@ function InspectorSection({
 }) {
   return (
     <section className="border-t border-border/60 px-4 py-4 first:border-t-0">
-      <h3 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/75">{title}</h3>
+      <h3 className="text-[12px] leading-[18px] font-semibold text-muted-foreground">{title}</h3>
       {description && <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>}
       <div className="mt-3">{children}</div>
     </section>
@@ -147,12 +149,14 @@ function AssigneeEditor({
   value,
   scheduled,
   sessions,
+  authoritativeOwner,
   disabled,
   onChange,
 }: {
   value: string
   scheduled: boolean
   sessions: readonly WorkspaceSessionDirectoryEntry[]
+  authoritativeOwner?: IssueAssigneeSession
   disabled?: boolean
   onChange: (next: string) => Promise<boolean>
 }) {
@@ -170,7 +174,12 @@ function AssigneeEditor({
     .toSorted((a, b) => Number(b.active) - Number(a.active) || b.updatedAt - a.updatedAt)
   const selectedResumeId = value.startsWith('@resume-') ? value.slice(1) : null
   const draftResumeId = draftValue.startsWith('@resume-') ? draftValue.slice(1) : null
-  const hasSelected = !selectedResumeId || sessionChoices.some((session) => session.resumeId === selectedResumeId)
+  const authoritativeSelected = selectedResumeId && authoritativeOwner?.resumeId === selectedResumeId
+    ? authoritativeOwner
+    : undefined
+  const hasSelected = !selectedResumeId
+    || sessionChoices.some((session) => session.resumeId === selectedResumeId)
+    || authoritativeSelected?.state === 'ready'
   const contextFor = (session: WorkspaceSessionDirectoryEntry) => {
     const rawContext = session.interactive?.title
       || session.interactive?.name
@@ -183,7 +192,7 @@ function AssigneeEditor({
   }
   const labelFor = (session: WorkspaceSessionDirectoryEntry) => {
     const activity = session.active ? 'active' : formatRelativeTime(session.updatedAt)
-    return `${session.resumeId} · ${session.agent} · ${activity}`
+    return `${session.resumeId}, ${session.agent}, ${activity}`
   }
 
   const policyChoices = scheduled
@@ -201,9 +210,13 @@ function AssigneeEditor({
   const selectedPolicy = policyChoices.find((choice) => choice.value === value)
   const selectedLabel = selectedSession
     ? contextFor(selectedSession) ?? selectedSession.resumeId
+    : authoritativeSelected?.state === 'ready'
+      ? authoritativeSelected.displayName ?? authoritativeSelected.resumeId
     : selectedPolicy?.label ?? (selectedResumeId ? selectedResumeId : value)
   const selectedDescription = selectedSession
-    ? `${selectedSession.agent} · ${selectedSession.active ? t('issues.detail.activeNow') : formatRelativeTime(selectedSession.updatedAt)}`
+    ? `${selectedSession.agent}, ${selectedSession.active ? t('issues.detail.activeNow') : formatRelativeTime(selectedSession.updatedAt)}`
+    : authoritativeSelected?.state === 'ready'
+      ? [authoritativeSelected.agent, authoritativeSelected.workspace?.tag].filter(Boolean).join(', ')
     : selectedPolicy?.description
   const draftSession = draftResumeId
     ? sessionChoices.find((session) => session.resumeId === draftResumeId)
@@ -213,7 +226,7 @@ function AssigneeEditor({
     ? contextFor(draftSession) ?? draftSession.resumeId
     : draftPolicy?.label ?? (draftResumeId ? draftResumeId : draftValue)
   const draftDescription = draftSession
-    ? `${draftSession.resumeId} · ${draftSession.agent} · ${draftSession.active ? t('issues.detail.activeNow') : formatRelativeTime(draftSession.updatedAt)}`
+    ? `${draftSession.resumeId}, ${draftSession.agent}, ${draftSession.active ? t('issues.detail.activeNow') : formatRelativeTime(draftSession.updatedAt)}`
     : draftPolicy?.description
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const filteredSessions = normalizedQuery
@@ -248,7 +261,7 @@ function AssigneeEditor({
       }
       if (!committing) close()
     }}>
-      <button
+      <Button
         type="button"
         disabled={disabled}
         aria-label={t('issues.detail.assignee')}
@@ -256,7 +269,8 @@ function AssigneeEditor({
           setDraftValue(value)
           setOpen(true)
         }}
-        className="oa-pressable flex min-h-11 w-full min-w-0 items-center gap-2.5 rounded-md border border-border bg-background px-3 py-2 text-left transition-colors hover:border-primary/40 hover:bg-secondary/50 disabled:cursor-not-allowed disabled:opacity-50"
+        variant="outline"
+        className="h-auto min-h-11 w-full min-w-0 justify-start gap-2.5 whitespace-normal px-3 py-2 text-left"
       >
         <UserRound size={15} className="shrink-0 text-muted-foreground" aria-hidden />
         <span className="min-w-0 flex-1">
@@ -264,7 +278,7 @@ function AssigneeEditor({
           {selectedDescription && <span className="block truncate text-[11px] text-muted-foreground">{selectedDescription}</span>}
         </span>
         <ChevronRight size={14} className="shrink-0 text-muted-foreground/70" aria-hidden />
-      </button>
+      </Button>
       <DialogContent className="max-h-[min(42rem,calc(100dvh-2rem))] min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden p-0 sm:max-w-xl">
         <DialogHeader className="px-4 pt-4">
           <DialogTitle>{t('issues.detail.chooseAssignee')}</DialogTitle>
@@ -282,7 +296,7 @@ function AssigneeEditor({
           />
         </label>
         <div className="min-h-0 max-w-full overflow-x-hidden overflow-y-auto px-2 pb-4">
-          <p className="px-2 pb-1.5 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/70">
+          <p className="px-2 pb-1.5 pt-2 text-[11px] font-medium text-muted-foreground">
             {t('issues.detail.assignmentPolicy')}
           </p>
           <div className="space-y-0.5">
@@ -296,7 +310,7 @@ function AssigneeEditor({
               />
             ))}
           </div>
-          <p className="mt-2 border-t border-border/60 px-2 pb-1.5 pt-3 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/70">
+          <p className="mt-2 border-t border-border/60 px-2 pb-1.5 pt-3 text-[11px] font-medium text-muted-foreground">
             {t('issues.detail.workspaceSessions')}
           </p>
           <div className="space-y-0.5">
@@ -304,6 +318,19 @@ function AssigneeEditor({
               <AssigneeChoice
                 label={t('issues.detail.signedSession', { resumeId: selectedResumeId })}
                 description={t('issues.detail.sessionUnavailable')}
+                selected={draftValue === value}
+                onClick={() => setDraftValue(value)}
+              />
+            )}
+            {authoritativeSelected?.state === 'ready'
+              && !sessionChoices.some((session) => session.resumeId === authoritativeSelected.resumeId) && (
+              <AssigneeChoice
+                label={authoritativeSelected.displayName ?? authoritativeSelected.resumeId}
+                description={[
+                  authoritativeSelected.resumeId,
+                  authoritativeSelected.agent,
+                  authoritativeSelected.workspace?.tag,
+                ].filter(Boolean).join(', ')}
                 selected={draftValue === value}
                 onClick={() => setDraftValue(value)}
               />
@@ -324,7 +351,7 @@ function AssigneeEditor({
         </div>
         <DialogFooter className="mx-0 mb-0 min-w-0 flex-col items-stretch rounded-none px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 w-full max-w-full overflow-hidden text-left sm:mr-auto sm:flex-1">
-            <span className="block text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/70">
+            <span className="block text-[11px] font-medium text-muted-foreground">
               {t('issues.detail.pendingAssignee')}
             </span>
             <span className="mt-0.5 block truncate text-sm font-medium text-foreground">{draftLabel}</span>
@@ -356,17 +383,18 @@ function AssigneeChoice({
   onClick: () => void
 }) {
   return (
-    <button
+    <Button
       type="button"
       onClick={onClick}
-      className="flex min-h-12 w-full min-w-0 max-w-full items-center gap-3 overflow-hidden rounded-md px-3 py-2 text-left transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      variant="ghost"
+      className="h-auto min-h-12 w-full min-w-0 max-w-full justify-start gap-3 overflow-hidden whitespace-normal px-3 py-2 text-left"
     >
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium text-foreground">{label}</span>
         {description && <span className="mt-0.5 block truncate text-xs text-muted-foreground">{description}</span>}
       </span>
-      {selected && <Check size={16} className="shrink-0 text-primary" aria-hidden />}
-    </button>
+      {selected && <SelectionCheckIcon />}
+    </Button>
   )
 }
 
@@ -434,7 +462,7 @@ function AgentEditor({
           <option value={value}>{value}</option>
         )}
       </select>
-      <button
+      <Button
         type="button"
         disabled={!canConfigure}
         onClick={() => {
@@ -446,10 +474,12 @@ function AgentEditor({
         aria-label={canConfigure
           ? t('issues.detail.configureRuntime', { runtime: effectiveAgent })
           : t('issues.detail.noConfigurableRuntime')}
-        className="flex size-10 shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 sm:size-9"
+        variant="outline"
+        size="icon"
+        className="size-10 sm:size-9"
       >
         <Settings size={14} aria-hidden />
-      </button>
+      </Button>
     </>
   )
 }
@@ -488,7 +518,11 @@ function runtimeUpdateToIssuePatch(
   }
 }
 
-function ownerSessionBusy(session: WorkspaceSessionDirectoryEntry | undefined): boolean {
+function ownerSessionBusy(session: {
+  active?: boolean
+  interactive?: { state: string }
+  latestExecution?: { status: string }
+} | undefined): boolean {
   return Boolean(
     session?.active
     || session?.interactive?.state === 'running'
@@ -603,6 +637,9 @@ function IssueAiEditor({
   const summaryEffort = bound
     ? committed.reasoningEffort ?? t('issues.detail.runtimeDecides')
     : committed.reasoningEffort ?? committedCredential?.resolvedReasoningEffort ?? t('issues.detail.runtimeDecides')
+  const summaryDetails = [...new Set([summaryModel, summaryEffort])]
+    .filter((value) => value !== summaryAccess)
+    .join(', ')
   const draftCapability = inherit && !bound
     ? {
         access: t('issues.detail.followWorkspaceHeadless'),
@@ -622,21 +659,22 @@ function IssueAiEditor({
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <button
+      <Button
         type="button"
         aria-label={t('issues.detail.aiConfiguration')}
         disabled={disabled}
         onClick={() => setOpen(true)}
-        className="oa-pressable grid min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2.5 rounded-md border border-border bg-background px-3 py-2.5 text-left transition-colors hover:border-primary/40 hover:bg-secondary/50 disabled:cursor-not-allowed disabled:opacity-50"
+        variant="outline"
+        className="grid h-auto min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)_auto] justify-start gap-2.5 whitespace-normal px-3 py-2.5 text-left"
       >
         <KeyRound size={15} className="text-muted-foreground" aria-hidden />
         <span className="min-w-0">
           <span className="block truncate text-[13px] font-medium text-foreground">{summaryAccess}</span>
-          <span className="block truncate text-[11px] text-muted-foreground">{summaryModel} · {summaryEffort}</span>
+          {summaryDetails && <span className="block truncate text-[11px] text-muted-foreground">{summaryDetails}</span>}
           <span className="mt-0.5 block text-[10px] text-muted-foreground/75">{provenance}</span>
         </span>
         <ChevronRight size={14} className="text-muted-foreground/70" aria-hidden />
-      </button>
+      </Button>
       <DialogContent className="max-h-[min(42rem,calc(100dvh-2rem))] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{t('issues.detail.aiConfiguration')}</DialogTitle>
@@ -855,7 +893,7 @@ function CommentBehaviorEditor({
         close()
       }}
     >
-      <button
+      <Button
         type="button"
         disabled={disabled}
         aria-label={t('issues.detail.commentBehavior')}
@@ -863,7 +901,8 @@ function CommentBehaviorEditor({
           setDraft(value ?? DEFAULT_ISSUE_COMMENT_PROMPT)
           setOpen(true)
         }}
-        className="oa-pressable flex min-h-11 w-full min-w-0 items-center gap-2.5 rounded-md border border-border bg-background px-3 py-2 text-left transition-colors hover:border-primary/40 hover:bg-secondary/50 disabled:cursor-not-allowed disabled:opacity-50"
+        variant="outline"
+        className="h-auto min-h-11 w-full min-w-0 justify-start gap-2.5 whitespace-normal px-3 py-2 text-left"
       >
         <MessageSquare size={15} className="shrink-0 text-muted-foreground" aria-hidden />
         <span className="min-w-0 flex-1">
@@ -873,7 +912,7 @@ function CommentBehaviorEditor({
           <span className="block truncate text-[11px] text-muted-foreground">{preview}</span>
         </span>
         <ChevronRight size={14} className="shrink-0 text-muted-foreground/70" aria-hidden />
-      </button>
+      </Button>
       <DialogContent className="max-h-[min(42rem,calc(100dvh-2rem))] min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden p-0 sm:max-w-lg">
         <DialogHeader className="px-4 pt-4">
           <DialogTitle>{t('issues.detail.commentBehavior')}</DialogTitle>
@@ -936,6 +975,7 @@ function PropertiesRail({
   headlessRuntime,
   agentReadiness,
   sessions,
+  assigneeSession,
   saving,
   retrying,
   error,
@@ -956,6 +996,7 @@ function PropertiesRail({
   headlessRuntime: WorkspaceRuntimeModeSettings | null
   agentReadiness: Readonly<Record<string, AgentCredentialReadiness>>
   sessions: readonly WorkspaceSessionDirectoryEntry[]
+  assigneeSession?: IssueAssigneeSession
   saving: boolean
   retrying: boolean
   error: string | null
@@ -982,10 +1023,18 @@ function PropertiesRail({
   const ownerResumeId = issue.assignee.startsWith('@resume-')
     ? issue.assignee.slice(1)
     : null
-  const ownerSession = ownerResumeId
+  const directoryOwner = ownerResumeId
     ? sessions.find((session) => session.resumeId === ownerResumeId)
     : undefined
-  const effectiveAgent = ownerSession?.agent || issue.agent || issueDefaultInOptions || defaultInOptions || agents[0]?.id || null
+  const authoritativeOwner = ownerResumeId && assigneeSession?.resumeId === ownerResumeId
+    ? assigneeSession
+    : undefined
+  const ownerSession = authoritativeOwner
+    ? (authoritativeOwner.state === 'ready' ? authoritativeOwner : undefined)
+    : directoryOwner
+  const ownerResolved = Boolean(ownerSession)
+  const ownerResolutionLoaded = Boolean(authoritativeOwner) || sessionsLoaded
+  const effectiveAgent = authoritativeOwner?.agent || directoryOwner?.agent || issue.agent || issueDefaultInOptions || defaultInOptions || agents[0]?.id || null
   const selectedReadiness = effectiveAgent ? agentReadiness[effectiveAgent] : undefined
   const [credentialOptions, setCredentialOptions] = useState<{
     agent: string
@@ -1031,6 +1080,11 @@ function PropertiesRail({
     // Failure/interruption messages may contain authoritative runtime diagnostics.
     // Keep those verbatim; only localize launcher-owned, deterministic states.
     if (health.state === 'failed' || health.state === 'interrupted') return health.message
+    if (health.blocker?.kind === 'agent_runtime_missing') {
+      return t('issues.detail.healthMessage.runtimeMissing', {
+        agent: health.blocker.displayName || health.blocker.agent,
+      })
+    }
     if (health.state === 'inactive') {
       return t('issues.detail.healthMessage.inactive', {
         status: t(`issues.status.${issue.status}`),
@@ -1061,7 +1115,7 @@ function PropertiesRail({
       id="issue-work-item"
       className="mt-5 min-w-0 w-full shrink-0 scroll-mt-20 lg:sticky lg:top-4 lg:col-start-2 lg:row-start-1 lg:row-span-3 lg:mt-0 lg:self-start"
     >
-      <div className="overflow-hidden rounded-xl border border-border bg-background lg:max-h-[calc(100dvh-2rem)] lg:overflow-y-auto">
+      <div className="overflow-hidden rounded-lg border border-border bg-background lg:max-h-[calc(100dvh-2rem)] lg:overflow-y-auto">
         <h3 className="sr-only">{t('issues.detail.workItem')}</h3>
 
         {issue.when && (
@@ -1073,8 +1127,8 @@ function PropertiesRail({
                   message: t('issues.detail.healthMessage.not_started'),
                 }}
               />
-              <span className="text-[11px] tabular-nums text-muted-foreground">
-                {t('issues.detail.lastRun')} · {issue.lastFiredAtMs
+              <span className="text-[11px] leading-[15px] tabular-nums text-muted-foreground">
+                {t('issues.detail.lastRun')}: {issue.lastFiredAtMs
                   ? formatRelativeTime(issue.lastFiredAtMs)
                   : t('issues.detail.never')}
               </span>
@@ -1152,6 +1206,7 @@ function PropertiesRail({
               value={issue.assignee}
               scheduled={Boolean(issue.when)}
               sessions={sessions}
+              authoritativeOwner={authoritativeOwner}
               disabled={saving}
               onChange={(assignee) => onPatch({ assignee })}
             />
@@ -1224,7 +1279,7 @@ function PropertiesRail({
                     agents={agents}
                     mode={headlessRuntime}
                     credentials={availableCredentials}
-                    disabled={saving || Boolean(ownerResumeId && (ownerSessionBusy(ownerSession) || (sessionsLoaded && !ownerSession)))}
+                    disabled={saving || Boolean(ownerResumeId && (ownerSessionBusy(ownerSession) || (ownerResolutionLoaded && !ownerResolved)))}
                     bound={Boolean(ownerResumeId)}
                     boundRuntime={ownerSession?.runtime}
                     onConfigureProvider={() => {
@@ -1249,7 +1304,7 @@ function PropertiesRail({
               {ownerResumeId && ownerSessionBusy(ownerSession) && (
                 <p className="mt-2 text-xs leading-snug text-muted-foreground">{t('issues.detail.sessionTurnInProgress')}</p>
               )}
-              {ownerResumeId && sessionsLoaded && !ownerSession && (
+              {ownerResumeId && ownerResolutionLoaded && !ownerResolved && (
                 <p className="mt-2 text-xs leading-snug text-muted-foreground">{t('issues.detail.sessionUnavailable')}</p>
               )}
               {agentNeedsCredential && (
@@ -1285,7 +1340,7 @@ function PropertiesRail({
           variant="primary"
           onConfirm={async () => {
             try {
-              await updateResumeRuntime(wsId, ownerResumeId, pendingCapability.update)
+              await updateResumeRuntime(authoritativeOwner?.workspace?.id ?? wsId, ownerResumeId, pendingCapability.update)
               await onRefreshSessions()
               setPendingCapability(null)
               setRuntimeError(null)
@@ -1360,9 +1415,9 @@ function CommentComposer({
   return (
     <div
       id="issue-reply"
-      className="scroll-mt-20 rounded-xl border border-border bg-background px-3 py-3 shadow-sm transition-colors focus-within:border-primary/45"
+      className="scroll-mt-20 rounded-lg border border-border bg-background px-3 py-3 transition-colors focus-within:border-primary/45"
     >
-      <textarea
+      <Textarea
         rows={3}
         value={text}
         disabled={sending}
@@ -1376,7 +1431,7 @@ function CommentComposer({
             void submit()
           }
         }}
-        className="min-h-20 w-full resize-y bg-transparent px-1 py-1 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/60 disabled:opacity-50"
+        className="min-h-20 w-full resize-y border-0 bg-transparent px-1 py-1 text-[13px] leading-relaxed shadow-none focus-visible:ring-0"
       />
       {error && <p className="mt-1.5 text-xs text-destructive">{error}</p>}
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-2">
@@ -1387,18 +1442,19 @@ function CommentComposer({
               ? t('issues.detail.replyBeforeFirstRun')
               : t('issues.detail.replyWithoutOwner')}
         </p>
-        <button
+        <Button
           type="button"
           onClick={() => void submit()}
           disabled={sending || text.trim().length === 0}
-          className="oa-pressable min-h-10 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-0"
+          size="sm"
+          className="min-h-10 sm:min-h-7"
         >
           {sending
             ? t('issues.detail.sending')
             : ownerResumeId
               ? t('issues.detail.commentNotify')
               : t('issues.detail.commentAsk')}
-        </button>
+        </Button>
       </div>
     </div>
   )
@@ -1408,25 +1464,18 @@ function CommentComposer({
 
 function WhatEditor({
   value,
-  scheduled,
   onSave,
 }: {
   value: string
-  scheduled: boolean
   onSave: (what: string) => Promise<boolean>
 }) {
   const { t } = useTranslation()
   return (
     <section id="issue-what" className="mt-4 scroll-mt-20 border-t border-border/60 pt-4">
       <div className="mb-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground/80">
+        <h2 className="text-sm font-semibold text-foreground">
           {t('issues.detail.what')}
         </h2>
-        <p className="mt-1 text-[11px] leading-snug text-muted-foreground/65">
-          {scheduled
-            ? t('issues.detail.whatScheduledDescription')
-            : t('issues.detail.whatDescription')}
-        </p>
         <p className="mt-1 text-[11px] leading-snug text-muted-foreground">
           {t('issues.detail.whatEditHint')}
         </p>
@@ -1447,28 +1496,30 @@ function RunRow({ run, onOpen }: { run: IssueRunRecord; onOpen: (run: IssueRunRe
     <li className="min-w-0 overflow-hidden rounded-lg border border-border bg-secondary px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
         <span
-          className={`inline-block rounded px-1.5 py-0.5 text-[11px] font-medium ${RUN_STATUS_STYLE[displayStatus]}`}
+          className={`inline-block rounded-full px-2 py-0.5 text-[11px] leading-[15px] font-medium ${RUN_STATUS_STYLE[displayStatus]}`}
         >
           {t(`issues.detail.runStatus.${displayStatus}`)}
         </span>
         <span className="text-xs text-muted-foreground">{run.agent}</span>
-        {run.model && <span className="text-xs text-muted-foreground">· {run.model}</span>}
-        {run.effort && <span className="text-xs text-muted-foreground">· {run.effort}</span>}
+        {run.model && <span className="text-xs text-muted-foreground">{run.model}</span>}
+        {run.effort && <span className="text-xs text-muted-foreground">{run.effort}</span>}
         <span className="ml-auto text-xs text-muted-foreground" title={new Date(run.startedAt).toLocaleString()}>
           {formatRelativeTime(run.startedAt)}
         </span>
-        <span className="text-xs text-muted-foreground/70">· {fmtDuration(run.durationMs)}</span>
-        <button
+        <span className="text-xs text-muted-foreground/70">{fmtDuration(run.durationMs)}</span>
+        <Button
           type="button"
           onClick={() => onOpen(run)}
           disabled={!run.resumable || run.status === 'running'}
           title={run.resumable
             ? t('issues.detail.openRunSessionTitle')
             : t('issues.detail.noResumableSessionTitle')}
-          className="min-h-10 rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-0"
+          variant="outline"
+          size="sm"
+          className="min-h-10 text-[11px] sm:min-h-7"
         >
           {t('issues.detail.openConversation')}
-        </button>
+        </Button>
       </div>
       {run.prompt && (
         <p className="mt-1.5 line-clamp-2 text-[12px] leading-snug text-foreground/80" title={run.prompt}>
@@ -1476,7 +1527,7 @@ function RunRow({ run, onOpen }: { run: IssueRunRecord; onOpen: (run: IssueRunRe
         </p>
       )}
       {run.output?.assistantPreview && (
-        <p className="mt-1.5 line-clamp-2 border-l-2 border-primary/25 pl-2 text-[12px] leading-snug text-muted-foreground" title={run.output.assistantPreview}>
+        <p className="mt-1.5 line-clamp-2 text-[12px] leading-snug text-muted-foreground" title={run.output.assistantPreview}>
           {run.output.assistantPreview}
         </p>
       )}
@@ -1484,7 +1535,7 @@ function RunRow({ run, onOpen }: { run: IssueRunRecord; onOpen: (run: IssueRunRe
         <p className={`mt-1 text-[11px] ${run.output.toolFailures > 0 ? 'text-destructive' : 'text-muted-foreground/60'}`}>
           {t('issues.detail.toolCalls', { count: run.output.toolCalls })}
           {run.output.toolFailures > 0
-            ? ` · ${t('issues.detail.toolFailures', { count: run.output.toolFailures })}`
+            ? `, ${t('issues.detail.toolFailures', { count: run.output.toolFailures })}`
             : ''}
         </p>
       )}
@@ -1529,17 +1580,18 @@ function InboxReportsSection({
   if (reports.length === 0) return null
   return (
     <section id="issue-inbox-reports" className="mt-8 scroll-mt-20">
-      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground/70">
+      <h3 className="mb-2 text-sm font-semibold text-foreground">
         {t('issues.detail.inboxReports')}
       </h3>
       <ul className="space-y-2">
         {reports.map((entry) => (
           <li key={entry.id}>
-            <button
+            <Button
               type="button"
               onClick={() => onOpen(entry.id)}
               title={t('issues.detail.openInInbox')}
-              className="group flex w-full items-center gap-2.5 rounded-lg border border-border bg-secondary px-3 py-2.5 text-left transition-colors hover:border-primary/40 hover:bg-muted"
+              variant="outline"
+              className="group h-auto w-full justify-start gap-2.5 whitespace-normal bg-secondary px-3 py-2.5 text-left"
             >
               <Inbox size={14} className="shrink-0 text-muted-foreground/70 transition-colors group-hover:text-primary" aria-hidden />
               <span className="min-w-0 flex-1 truncate text-[12px] text-foreground/80">
@@ -1551,7 +1603,7 @@ function InboxReportsSection({
               >
                 {formatRelativeTime(entry.ts)}
               </span>
-            </button>
+            </Button>
           </li>
         ))}
       </ul>
@@ -1611,7 +1663,7 @@ function mutationValue(field: string, value: string, t: TFunction): string {
       if (schedule.kind === 'every' && schedule.every) {
         return t('issues.detail.mutationValue.every', { every: schedule.every })
       }
-      if (schedule.kind === 'cron') return `${schedule.cron}${schedule.timezone ? ` · ${schedule.timezone}` : ''}`
+      if (schedule.kind === 'cron') return `${schedule.cron}${schedule.timezone ? `, ${schedule.timezone}` : ''}`
     } catch {
       // Older audit rows can still carry a hand-written value; show it safely.
     }
@@ -1651,7 +1703,7 @@ export function IssuePendingReply({
   const { t } = useTranslation()
   return (
     <div className="mt-3 border-t border-border/60 pt-2">
-      <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+      <p className="flex items-center gap-1.5 text-[11px] leading-[15px] text-muted-foreground">
         <LoaderCircle size={11} className="shrink-0 animate-spin text-primary" aria-hidden />
         <span>
           {t('issues.detail.waitingForPrefix')}{' '}
@@ -1701,11 +1753,8 @@ export function IssueActivity({
 
   return (
     <section id="issue-activity" className="mt-8 scroll-mt-20">
-      <div className="mb-3 flex items-baseline justify-between gap-3 border-t border-border/60 pt-5">
+      <div className="mb-3 border-t border-border/60 pt-5">
         <h2 className="text-sm font-semibold text-foreground">{t('issues.detail.activity')}</h2>
-        <span className="hidden text-[11px] text-muted-foreground sm:inline">
-          {t('issues.detail.activityDescription')}
-        </span>
       </div>
       {activity.length === 0 ? (
         <p className="mb-3 rounded-lg border border-dashed border-border px-4 py-4 text-center text-xs text-muted-foreground">
@@ -1719,11 +1768,11 @@ export function IssueActivity({
               const delivery = comment.delivery
               return (
                 <li key={`comment:${comment.id}`} className="relative pl-8">
-                  <span className="absolute left-[3px] top-3 z-10 grid h-[18px] w-[18px] place-items-center rounded-full border border-border bg-background text-primary">
+                  <span className="absolute left-[3px] top-3 z-10 grid h-[18px] w-[18px] place-items-center bg-background text-primary">
                     <MessageSquare size={10} aria-hidden />
                   </span>
-                  <article className={`rounded-xl border bg-secondary px-4 py-3 ${comment.replyTo ? 'ml-3 border-primary/25' : 'border-border'}`}>
-                    <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+                  <article className={`rounded-lg border bg-secondary px-4 py-3 ${comment.replyTo ? 'ml-3 border-primary/25' : 'border-border'}`}>
+                    <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-[15px] text-muted-foreground">
                       <span className="font-medium text-foreground/85">{comment.author}</span>
                       {comment.replyTo && (
                         <span className="rounded bg-muted px-1.5 py-0.5">{t('issues.detail.reply')}</span>
@@ -1752,7 +1801,7 @@ export function IssueActivity({
             const origin = record.origin
             const isSession = origin.kind === 'session'
             const originLabel = isSession
-              ? `${origin.agent} · ${origin.resumeId}`
+              ? `${origin.agent}, ${origin.resumeId}`
               : origin.kind === 'human'
                 ? t('issues.detail.human')
                 : origin.kind === 'external'
@@ -1760,7 +1809,7 @@ export function IssueActivity({
                   : unknownOriginLabel(origin.reason, t)
             return (
               <li key={`provenance:${record.id}`} className="relative flex min-w-0 items-start gap-2.5 py-1 pl-8">
-                <span className="absolute left-[3px] top-2 z-10 grid h-[18px] w-[18px] place-items-center rounded-full border border-border bg-background text-muted-foreground">
+                <span className="absolute left-[3px] top-2 z-10 grid h-[18px] w-[18px] place-items-center bg-background text-muted-foreground">
                   <History size={10} aria-hidden />
                 </span>
                 <div className="min-w-0 flex-1">
@@ -1789,29 +1838,29 @@ export function IssueActivity({
                             initialFocus={false}
                             className="z-30 w-72 max-w-[calc(100vw-3rem)] gap-0 rounded-xl border border-border/70 bg-secondary p-3 text-left shadow-lg ring-0"
                           >
-                            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/60">
+                            <p className="text-[11px] font-medium text-muted-foreground">
                               {t('issues.detail.session')}
                             </p>
                             <p className="mt-1 text-[12px] font-medium text-foreground">{origin.agent}</p>
                             <p className="mt-0.5 break-all font-mono text-[10px] leading-relaxed text-muted-foreground">
                               {origin.resumeId}
                             </p>
-                            <button
+                            <Button
                               type="button"
                               onClick={() => void openSession(record)}
                               disabled={openingId !== null}
-                              className="oa-pressable mt-3 min-h-10 w-full rounded-lg bg-primary px-3 py-2 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-wait disabled:opacity-50"
+                              className="mt-3 min-h-10 w-full text-[11px]"
                             >
                               {openingId === record.id
                                 ? t('issues.detail.opening')
                                 : t('issues.detail.openConversation')}
-                            </button>
+                            </Button>
                         </PopoverContent>
                       </Popover>
                     ) : (
                       <span className="font-medium text-foreground/80">{originLabel}</span>
                     )}{' '}
-                    {provenanceActionLabel(record.action, t)} ·{' '}
+                    {provenanceActionLabel(record.action, t)}{' '}
                     <span title={new Date(record.at).toLocaleString()}>{formatRelativeTime(record.at)}</span>
                   </div>
                   {record.mutation && (
@@ -1855,29 +1904,25 @@ function RunsSection({
   if (runs.length === 0) return null
   const visible = expanded ? runs : runs.slice(0, 4)
   return (
-    <section id="issue-runs" className="mt-8 scroll-mt-20 rounded-xl border border-border bg-secondary/45 px-3 py-3 sm:px-4">
+    <section id="issue-runs" className="mt-8 scroll-mt-20 rounded-lg border border-border bg-secondary/45 px-3 py-3 sm:px-4">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-semibold text-foreground">{t('issues.detail.runs')}</h2>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">
-            {t('issues.detail.runsDescription')}
-          </p>
-        </div>
-        <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">{runs.length}</span>
+        <h2 className="text-sm font-semibold text-foreground">{t('issues.detail.runs')}</h2>
+        <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] leading-[15px] text-muted-foreground">{runs.length}</span>
       </div>
       <ul className="space-y-2">
         {visible.map((run) => <RunRow key={run.taskId} run={run} onOpen={onOpen} />)}
       </ul>
       {runs.length > 4 && (
-        <button
+        <Button
           type="button"
           onClick={() => setExpanded((value) => !value)}
-          className="oa-pressable mt-3 min-h-10 w-full rounded-md px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:min-h-0"
+          variant="ghost"
+          className="mt-3 min-h-10 w-full text-xs sm:min-h-8"
         >
           {expanded
             ? t('issues.detail.showRecentRuns')
             : t('issues.detail.showMoreRuns', { count: runs.length - 4 })}
-        </button>
+        </Button>
       )}
     </section>
   )
@@ -1916,18 +1961,20 @@ function WikilinkPicker({
         className="w-full max-w-sm rounded-lg border border-border bg-secondary p-4 shadow-xl"
       >
         <div className="mb-1 flex items-start justify-between gap-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground/70">
-            <span className="font-mono normal-case text-foreground">[[{resolution.name}]]</span>{' '}
+          <h3 className="text-sm font-semibold text-foreground">
+            <span className="font-mono text-foreground">[[{resolution.name}]]</span>{' '}
             {t('issues.detail.matchesSeveral')}
           </h3>
-          <button
+          <Button
             type="button"
             onClick={onClose}
             aria-label={t('issues.detail.close')}
-            className="-mr-1 -mt-0.5 shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+            variant="ghost"
+            size="icon-xs"
+            className="-mr-1 -mt-0.5 text-muted-foreground"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
         <p className="mb-3 text-[12px] leading-snug text-muted-foreground">
           {t('issues.detail.pickWikilinkTarget')}
@@ -1935,34 +1982,36 @@ function WikilinkPicker({
         <ul className="space-y-1.5">
           {resolution.entity && (
             <li>
-              <button
+              <Button
                 type="button"
                 onClick={() => onEntity(resolution.entity!.name)}
                 title={t('issues.detail.openTrackedEntity', { name: resolution.entity.name })}
-                className="group flex w-full items-center gap-2.5 rounded-lg border border-border bg-muted/30 px-3 py-2 text-left transition-colors hover:border-primary/40 hover:bg-muted"
+                variant="outline"
+                className="group h-auto w-full justify-start gap-2.5 whitespace-normal bg-muted/30 px-3 py-2 text-left"
               >
                 <EntityIcon size={14} className="shrink-0 text-muted-foreground/70 transition-colors group-hover:text-primary" aria-hidden />
-                <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground">
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px] leading-[18px] text-foreground">
                   {resolution.entity.name}
                 </span>
-                <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+                <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] leading-[15px] text-muted-foreground">
                   {resolution.entity.type}
                 </span>
-              </button>
+              </Button>
             </li>
           )}
           {resolution.issues.map((iss) => (
             <li key={`${iss.wsId}:${iss.id}`}>
-              <button
+              <Button
                 type="button"
                 onClick={() => onIssue(iss)}
                 title={t('issues.detail.openIssueInWorkspace', { id: iss.id, workspace: iss.wsTag })}
-                className="group flex w-full items-center gap-2.5 rounded-lg border border-border bg-muted/30 px-3 py-2 text-left transition-colors hover:border-primary/40 hover:bg-muted"
+                variant="outline"
+                className="group h-auto w-full justify-start gap-2.5 whitespace-normal bg-muted/30 px-3 py-2 text-left"
               >
                 <ListChecks size={14} className="shrink-0 text-muted-foreground/70 transition-colors group-hover:text-primary" aria-hidden />
                 <span className="min-w-0 flex-1 truncate text-[12px] text-foreground">{iss.title}</span>
                 <span
-                  className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground"
+                  className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] leading-[15px] text-muted-foreground"
                   title={t('issues.workspaceTitle', {
                     workspace: iss.wsTag,
                     id: iss.wsId.slice(0, 8),
@@ -1970,7 +2019,7 @@ function WikilinkPicker({
                 >
                   {iss.wsTag}
                 </span>
-              </button>
+              </Button>
             </li>
           ))}
         </ul>
@@ -2023,8 +2072,9 @@ export function IssueDetail({
   const [retrying, setRetrying] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [agentReadiness, setAgentReadiness] = useState<Record<string, AgentCredentialReadiness>>({})
-  const [sessionDirectory, setSessionDirectory] = useState<readonly WorkspaceSessionDirectoryEntry[]>([])
-  const [sessionsLoaded, setSessionsLoaded] = useState(false)
+  const sessionSnapshot = useWorkspaceSessionDirectory(wsId)
+  const sessionDirectory = sessionSnapshot.directory?.sessions ?? []
+  const sessionsLoaded = !sessionSnapshot.loading
   // Set when a clicked `[[name]]` resolves to >1 target — drives the picker.
   const [picker, setPicker] = useState<WikilinkResolution | null>(null)
   const workspace = workspaces.find((candidate) => candidate.id === wsId) ?? null
@@ -2045,21 +2095,7 @@ export function IssueDetail({
     return () => { live = false }
   }, [wsId])
 
-  const refreshSessions = useCallback(async () => {
-    try {
-      const directory = await getWorkspaceSessionDirectory(wsId)
-      setSessionDirectory(Array.isArray(directory.sessions) ? directory.sessions : [])
-    } catch {
-      setSessionDirectory([])
-    } finally {
-      setSessionsLoaded(true)
-    }
-  }, [wsId])
-
-  useEffect(() => {
-    setSessionsLoaded(false)
-    void refreshSessions()
-  }, [refreshSessions])
+  const refreshSessions = sessionSnapshot.refresh
 
   const gotoIssue = useCallback(
     (ref: WikilinkIssueRef) => {
@@ -2090,7 +2126,7 @@ export function IssueDetail({
       if (record.origin.kind !== 'session') return
       setSidebar('chat')
       await openHeadlessRun(record.origin.workspaceId, record.origin.resumeId, {
-        title: `${data?.issue.title ?? id} · ${record.action}`,
+        title: `${data?.issue.title ?? id}, ${record.action}`,
       })
     },
     [data?.issue.title, id, openHeadlessRun, setSidebar],
@@ -2174,7 +2210,7 @@ export function IssueDetail({
   }, [retrying, wsId, id, mutate])
 
   const backToBoard = (
-    <button
+    <Button
       type="button"
       onClick={() => {
         if (onBack) {
@@ -2184,10 +2220,12 @@ export function IssueDetail({
         setSidebar('issue')
         openOrFocus({ kind: 'issue', params: {} })
       }}
-      className="mb-2 inline-flex min-h-10 items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground sm:mb-4 sm:min-h-0"
+      variant="ghost"
+      size="sm"
+      className="mb-2 min-h-10 px-0 text-xs text-muted-foreground hover:bg-transparent sm:mb-4 sm:min-h-7"
     >
       <ArrowLeft size={13} /> {backLabel ?? t('nav.item.issue')}
-    </button>
+    </Button>
   )
 
   const stableOwnerResumeId = data?.issue.assignee.startsWith('@resume-')
@@ -2266,6 +2304,7 @@ export function IssueDetail({
           headlessRuntime={workspace?.runtimeSettings?.runtime.headless ?? null}
           agentReadiness={agentReadiness}
           sessions={sessionDirectory}
+          assigneeSession={data.assigneeSession}
           saving={saving}
           retrying={retrying}
           error={actionError}
@@ -2282,7 +2321,6 @@ export function IssueDetail({
           <WhatEditor
             key={`${wsId}:${id}`}
             value={issue.what}
-            scheduled={Boolean(issue.when)}
             onSave={(what) => onPatch({ what })}
           />
           <IssueActivity
@@ -2301,7 +2339,7 @@ export function IssueDetail({
             onOpen={(run) => {
               setSidebar('chat')
               void openHeadlessRun(run.wsId, run.resumeId, {
-                title: `${issue.title} · ${run.agent}`,
+                title: `${issue.title}, ${run.agent}`,
               })
             }}
           />

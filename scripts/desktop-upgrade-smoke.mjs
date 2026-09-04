@@ -24,9 +24,11 @@ import {
   buildUpgradeVerifyExpression,
   candidateDesktopAssetName,
   DESKTOP_UPGRADE_RECEIPT_SCHEMA_VERSION,
+  desktopUpgradeWorkspaceTags,
   previousDesktopAssetName,
   selectPreviousDesktopTag,
   versionFromTag,
+  waitForChromiumProfileRelease,
   windowsInstallerArgs,
 } from './desktop-upgrade-smoke-lib.mjs'
 import { packagedElectronExecutable } from './smoke-packaged-toolchain.mjs'
@@ -368,6 +370,13 @@ async function runRendererJourney({ executable, env, electronUserData, expressio
     client = null
     const exitCode = await waitForExit(child)
     if (exitCode !== 0) throw new Error(`${label} exited ${exitCode}`)
+    if (process.platform === 'darwin') {
+      await waitForChromiumProfileRelease(electronUserData, {
+        label,
+        childExitCode: child.exitCode,
+        childPid: child.pid,
+      })
+    }
     return result
   } catch (error) {
     client?.close()
@@ -454,8 +463,7 @@ async function main() {
       OPENALICE_UTA_DISABLED: '1',
     }
     delete commonEnv.OPENALICE_TAKEOVER
-    const tag = `desktop-upgrade-${previousVersion.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`
-    const postUpgradeTag = `${tag}-post`
+    const { tag, postUpgradeTag } = desktopUpgradeWorkspaceTags(previousVersion)
     const sentinelKey = 'openalice-desktop-upgrade-smoke'
     const sentinelValue = `${fromTag}->${candidateVersion}`
 

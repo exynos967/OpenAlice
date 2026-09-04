@@ -11,7 +11,9 @@ import {
 } from './resume-registry.js'
 import { sessionPreferredTitle, type SessionRecord } from './session-registry.js'
 import type { SessionCreatedBy } from './session-metadata.js'
+import { projectSessionPresentationTitle } from './session-presentation.js'
 import {
+  isInteractiveSessionActive,
   projectPublicSessionRuntime,
   type PublicSessionRuntime,
 } from './public-session.js'
@@ -36,6 +38,8 @@ export interface WorkspaceSessionDirectoryEntry {
   /** Live Issue ownership/occupancy. Presentation preferences decide whether to show it. */
   issueAttached?: true
   runtime?: PublicSessionRuntime
+  /** Backend-authoritative title with internal launch wrappers projected away. */
+  presentationTitle?: string
   latestExecution?: {
     taskId: string
     status: HeadlessTaskStatus
@@ -104,13 +108,25 @@ export function buildWorkspaceSessionDirectory(input: {
   isActive(resumeId: string): boolean
   rosterVisibilityFor?(resumeId: string): 'hidden' | undefined
   issueAttachedFor?(resumeId: string): true | undefined
+  issueTitleFor?(workspaceId: string, issueId: string): string | undefined
 }): WorkspaceSessionDirectory {
   return {
     workspace: input.workspace,
     sessions: input.identities.map((identity) => {
       const execution = input.latestExecutionFor(identity.resumeId)
       const interactive = input.interactiveFor(identity.resumeId)
+      const interactiveActive = isInteractiveSessionActive(interactive)
       const interactiveTitle = interactive ? sessionPreferredTitle(interactive) : undefined
+      const presentationTitle = interactive
+        ? projectSessionPresentationTitle({
+            record: interactive,
+            ...(identity.metadata?.createdBy
+              ? { createdBy: identity.metadata.createdBy }
+              : {}),
+            ...(execution ? { latestExecution: execution } : {}),
+            ...(input.issueTitleFor ? { issueTitleFor: input.issueTitleFor } : {}),
+          })
+        : undefined
       return {
         resumeId: identity.resumeId,
         agent: identity.agent,
@@ -123,7 +139,8 @@ export function buildWorkspaceSessionDirectory(input: {
         resumable: identity.lifecycle !== 'retired'
           && sessionPresence(identity) !== 'deleted'
           && Boolean(identity.agentSessionId),
-        active: identity.lifecycle !== 'retired' && input.isActive(identity.resumeId),
+        active: identity.lifecycle !== 'retired'
+          && (input.isActive(identity.resumeId) || interactiveActive),
         ...(identity.metadata?.createdBy ? { createdBy: identity.metadata.createdBy } : {}),
         ...(input.rosterVisibilityFor?.(identity.resumeId) === 'hidden'
           ? { rosterVisibility: 'hidden' as const }
@@ -132,6 +149,7 @@ export function buildWorkspaceSessionDirectory(input: {
         ...(identity.runtimeBinding
           ? { runtime: projectPublicSessionRuntime(identity.runtimeBinding) }
           : {}),
+        ...(presentationTitle ? { presentationTitle } : {}),
         ...(execution
           ? {
               latestExecution: {

@@ -131,6 +131,12 @@ control, whether it resolves from login, environment, user settings, or local
 project files. Launcher-owned explicit `--settings` remain available in both
 modes.
 
+Headless streaming adapters must preserve incremental assistant text exactly,
+including standalone spaces and newlines. Those whitespace-only deltas carry
+Markdown structure and must not pass through truthiness checks based on
+`trim()`. Trimming remains appropriate only at a final-result or display
+boundary where the adapter has received one complete message.
+
 A registered provider default is descriptive model metadata, not an implicit
 Session launch parameter. OpenAlice may label that default in selection help,
 but it persists and projects an effort only when a Workspace preference, Issue,
@@ -434,6 +440,14 @@ Readiness is diagnostic rather than a synchronous preflight: ordinary Chat,
 Manager, Session spawn, and Session resume proceed through the selected native
 runtime without waiting for a probe. Onboarding, explicit Retry, and background
 health surfaces may probe and cache the result without becoming a launch gate.
+
+Readiness results are scoped to the executable identity that was probed. Every
+cheap runtime discovery compares installed state, resolved path, and a file
+fingerprint with that cached identity. Installing, removing, replacing, or
+rerouting a CLI invalidates the old probe result back to `unknown` (or
+`not_installed`). Returning focus to the UI refreshes inventory and the cached
+readiness snapshot with GET requests only; an explicit user action remains the
+only path that starts a headless readiness probe.
 
 Choosing an OpenAlice credential is an explicit override. A fresh Session may
 bind that vault reference without writing it into the Workspace or changing the

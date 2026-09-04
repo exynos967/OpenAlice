@@ -1,12 +1,24 @@
 import type { ModelReasoningEffort } from '../ai-providers/model-semantics.js';
 import type { SessionRuntimeBinding } from './cli-adapter.js';
-import { sessionPreferredTitle, type SessionRecord } from './session-registry.js';
+import type { HeadlessTaskRecord } from './headless-task-registry.js';
+import type { SessionCreatedBy } from './session-metadata.js';
+import { projectSessionPresentationTitle } from './session-presentation.js';
+import type { SessionRecord } from './session-registry.js';
 
 export interface PublicSessionRuntime {
   readonly credentialSource: 'native' | 'vault' | 'workspace';
   readonly credentialSlug?: string;
   readonly model?: string;
   readonly reasoningEffort?: ModelReasoningEffort;
+}
+
+/** A running terminal or WebPi record owns the interactive execution slot.
+ * Headless records use the separate launcher lease so stale persisted state
+ * cannot make an Issue owner look busy after its process has exited. */
+export function isInteractiveSessionActive(
+  record: Pick<SessionRecord, 'state' | 'surface'> | null | undefined,
+): boolean {
+  return record?.state === 'running' && record.surface !== 'headless';
 }
 
 /** Secret-free credential/model/effort projection of a persisted Session binding. */
@@ -57,6 +69,10 @@ export interface PublicSessionProjectionContext {
   readonly runtimeBinding?: SessionRuntimeBinding | null;
   readonly displayName?: string;
   readonly presence?: 'active' | 'archived' | 'deleted';
+  /** Structured provenance used only for the public read-side title. */
+  readonly createdBy?: SessionCreatedBy;
+  readonly latestExecution?: Pick<HeadlessTaskRecord, 'trigger' | 'inquiry' | 'output'> | null;
+  readonly issueTitleFor?: (workspaceId: string, issueId: string) => string | undefined;
 }
 
 /**
@@ -85,7 +101,14 @@ export function projectPublicSession(
     resumeId: record.resumeId,
     pid: terminal?.pid ?? webPi?.pid ?? null,
     startedAt: terminal?.startedAt ?? webPi?.startedAt ?? null,
-    title: sessionPreferredTitle(record) ?? null,
+    title: projectSessionPresentationTitle({
+      record,
+      ...(context.createdBy ? { createdBy: context.createdBy } : {}),
+      ...(context.latestExecution !== undefined
+        ? { latestExecution: context.latestExecution }
+        : {}),
+      ...(context.issueTitleFor ? { issueTitleFor: context.issueTitleFor } : {}),
+    }) ?? null,
     ...(context.displayName ? { displayName: context.displayName } : {}),
     sourceRunId: record.sourceRunId ?? null,
     ...(context.presence ? { presence: context.presence } : {}),
