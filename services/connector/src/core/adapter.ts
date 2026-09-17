@@ -1,4 +1,6 @@
+import type { ConnectorModelRequest, ConnectorModelPanel } from '@traderalice/connector-protocol'
 import type {
+  ConnectorAttachment,
   ConnectorAdapterConfig,
   ConnectorAdapterHealth,
   ConnectorArtifactDelivery,
@@ -29,6 +31,7 @@ export type ConnectorCommandHandler = (context: ConnectorCommandContext) => Prom
 export type ConnectorStartFailureDisposition = 'fatal' | 'retry'
 
 export interface ConnectorAdapterContext {
+  sessionModel?(request: ConnectorModelRequest): Promise<ConnectorModelPanel>
   commands: CommandRegistry
   updateSettings(patch: Record<string, string | number | boolean>): Promise<void>
   getServiceStatus(): string
@@ -53,6 +56,7 @@ export interface ConnectorAdapter {
   stop(): Promise<void>
   deliver(notification: InboxNotification): Promise<void>
   sendOwnerText(text: string): Promise<void>
+  sendOwnerFile?(attachment: ConnectorAttachment, presentation?: import('./reply-directives.js').ReplyMedia): Promise<void>
   /** Optional transport-native lifecycle projection for desk-capable adapters. */
   sendOwnerChat?(message: OwnerChatMessage): Promise<void>
   /** Directed current-file delivery. Must not send an Inbox summary. */

@@ -5,6 +5,7 @@ import { CommandRegistry } from '../core/adapter.js'
 import { formatInboxNotification } from './shared.js'
 import { TelegramConnectorAdapter, withTimeout } from './telegram.js'
 
+const handlers = new Map<string, (ctx: any) => Promise<void>>()
 const startMock = vi.fn()
 const stopMock = vi.fn()
 const getMe = vi.fn(async () => ({ id: 1, is_bot: true, first_name: 'OpenAlice', username: 'openalice_bot' }))
@@ -14,6 +15,8 @@ const sendMessageDraft = vi.fn(async () => true)
 const sendRichMessageDraft = vi.fn(async () => true)
 const sendChatAction = vi.fn(async () => true)
 const sendMessage = vi.fn(async () => undefined)
+const sendPhoto = vi.fn(async () => undefined)
+const sendSticker = vi.fn(async () => undefined)
 const sendDocument = vi.fn(async () => undefined)
 
 vi.mock('grammy', async (importOriginal) => {
@@ -31,9 +34,11 @@ vi.mock('grammy', async (importOriginal) => {
         sendChatAction,
         sendMessage,
         sendDocument,
+        sendPhoto,
+        sendSticker,
       }
-      command() {}
-      on() {}
+      command(name: string, handler: (ctx: any) => Promise<void>) { handlers.set(name, handler) }
+      on(name: string, handler: (ctx: any) => Promise<void>) { handlers.set(name, handler) }
       start(options: { onStart?: () => void }) {
         return startMock(options)
       }
@@ -334,6 +339,30 @@ describe('Telegram rich outbound text', () => {
     await adapter.stop()
   })
 
+  it('keeps working activity through multiple text/tool pauses and ends silently', async () => {
+    const adapter = new TelegramConnectorAdapter({ attemptTimeoutMs: 200, reconnectDelayMs: 20 })
+    await startUntilReady(adapter, { botToken: 'token', ownerUserId: '42', chatId: '99' })
+    vi.useFakeTimers()
+    try {
+      await adapter.sendOwnerChat({ id: 'a', adapterId: 'telegram', conversationId: 'turn', phase: 'accepted' })
+      await adapter.sendOwnerChat({ id: 'p1', adapterId: 'telegram', conversationId: 'turn', phase: 'progress', text: 'Reading.' })
+      const count = sendChatAction.mock.calls.length
+      await vi.advanceTimersByTimeAsync(12_000)
+      expect(sendChatAction.mock.calls.length).toBeGreaterThan(count)
+      await adapter.sendOwnerChat({ id: 'p2', adapterId: 'telegram', conversationId: 'turn', phase: 'progress', text: 'Checking.' })
+      await vi.advanceTimersByTimeAsync(24_000)
+      expect(sendRichMessageDraft).toHaveBeenLastCalledWith(99, expect.any(Number), { markdown: 'Checking.' })
+      await adapter.sendOwnerChat({ id: 'end', adapterId: 'telegram', conversationId: 'turn', phase: 'final' })
+      const stopped = sendChatAction.mock.calls.length
+      await vi.advanceTimersByTimeAsync(24_000)
+      expect(sendChatAction).toHaveBeenCalledTimes(stopped)
+      expect(sendRichMessage).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+      await adapter.stop()
+    }
+  })
+
   it('falls back to Telegram typing when live drafts are unavailable', async () => {
     sendMessageDraft.mockRejectedValueOnce(new Error('method unavailable'))
     const adapter = new TelegramConnectorAdapter({ attemptTimeoutMs: 200, reconnectDelayMs: 20 })
@@ -431,4 +460,40 @@ describe('Telegram rich outbound text', () => {
     expect(sendMessage).not.toHaveBeenCalled()
     await adapter.stop()
   })
+  it('uses native photo and sticker delivery without changing ordinary artifact delivery', async () => {
+    const adapter = new TelegramConnectorAdapter({ attemptTimeoutMs: 200, reconnectDelayMs: 20 })
+    await startUntilReady(adapter, { botToken: 'token', ownerUserId: '42', chatId: '99' })
+    const content = Buffer.from('test')
+    const attachment = { filename: 'hello.png', mediaType: 'image/png', sizeBytes: content.length,
+      contentBase64: content.toString('base64'), contentSha256: createHash('sha256').update(content).digest('hex') }
+    await adapter.sendOwnerFile(attachment, 'image')
+    await adapter.sendOwnerFile(attachment, 'sticker')
+    expect(sendPhoto).toHaveBeenCalledWith('99', expect.any(Object))
+    expect(sendSticker).toHaveBeenCalledWith('99', expect.any(Object))
+    expect(sendDocument).not.toHaveBeenCalled()
+    await adapter.stop()
+  })
+
+})
+
+
+it('keeps model commands and callbacks owner-only and outside the agent message stream', async () => {
+  startMock.mockImplementation(async ({ onStart }) => { onStart?.() })
+  const adapter = new TelegramConnectorAdapter()
+  const call = vi.fn(async () => ({ resumeId: 'resume-1', revision: 'v1', runtime: 'codex', selection: { credential: 'native', model: null, effort: null }, credentials: [{ id: 'native', label: 'Runtime login' }], models: [], efforts: [], running: false, saved: false }))
+  const forwardOwnerText = vi.fn()
+  try {
+    await adapter.start({ enabled: true, settings: { botToken: 'test-token', ownerUserId: '42', chatId: '42' } }, { ...context(), sessionModel: call, forwardOwnerText })
+    await vi.waitFor(() => expect(handlers.has('model')).toBe(true))
+    const ctx = { chat: { id: 42, type: 'private' }, from: { id: 77 }, reply: vi.fn(async () => ({ message_id: 5 })), answerCallbackQuery: vi.fn(), callbackQuery: { data: 'mdl:wrong:save' } }
+    await handlers.get('model')!(ctx)
+    await handlers.get('callback_query:data')!(ctx)
+    expect(call).not.toHaveBeenCalled()
+    ctx.from.id = 42; ctx.chat.type = 'group'
+    await handlers.get('model')!(ctx); expect(call).not.toHaveBeenCalled()
+    ctx.chat.type = 'private'
+    await handlers.get('model')!(ctx); expect(call).toHaveBeenCalledTimes(1)
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('Runtime: codex'), expect.objectContaining({ reply_markup: expect.any(Object) }))
+    expect(forwardOwnerText).not.toHaveBeenCalled()
+  } finally { await adapter.stop() }
 })

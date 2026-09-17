@@ -59,6 +59,7 @@ import { existingOwnerSmokeMode, resolveExistingOwnerStartup } from './existing-
 import { inspectPreviousUpdateAttempt, recordUpdateAttempt } from './update-attempt.js'
 import { childIsRunning, stopChild } from './child-shutdown.js'
 import { exitDesktopProcess } from './app-exit.js'
+import { configureWindowChrome, windowChromeOptions } from './window-chrome.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -461,6 +462,12 @@ async function runRendererOnboardingSmoke(win: BrowserWindow): Promise<void> {
       throw new Error('isolated packaged smoke should be locked by OPENALICE_HOME')
     }
 
+    const setup = await json(await fetch('/api/workspaces/project-setup'))
+    const workspaceList = await json(await fetch('/api/workspaces'))
+    if (setup.pending?.length || !workspaceList.workspaces?.some(ws => ws.template === 'chat')) {
+      throw new Error('new project did not prepare Chat before opening the renderer')
+    }
+
     const agents = await json(await fetch('/api/workspaces/agents'))
     const pi = agents.agents?.find((agent) => agent.id === 'pi')
     if (!pi?.installed) throw new Error('managed Pi was not detected by packaged /agents')
@@ -484,15 +491,15 @@ async function runRendererOnboardingSmoke(win: BrowserWindow): Promise<void> {
     }, 60000)
 
     if (!initialReadiness.agents.pi?.ready) {
-      await waitFor('AI credential action', () => {
+      const addCredential = await waitFor('AI credential action', () => {
         const button = document.querySelector('[data-testid="first-run-guide-primary"]')
         return button &&
           !button.disabled &&
           button.getAttribute('data-onboarding-action') === 'add-credential'
-          ? true
-          : false
+          ? button
+          : document.querySelector('[data-testid="first-run-guide-add-provider"]')
       })
-      clickPrimary()
+      addCredential.click()
       await waitFor('credential modal', () => credentialPrimary())
       credentialPrimary().click()
       await waitFor('verified credential', () => {
@@ -518,13 +525,10 @@ async function runRendererOnboardingSmoke(win: BrowserWindow): Promise<void> {
       const snapshot = await json(await fetch('/api/agent-runtimes/readiness'))
       const row = snapshot.agents?.pi
       const button = document.querySelector('[data-testid="first-run-guide-primary"]')
-      return activeStep() === 'ai' &&
-        row?.ready === true &&
-        button &&
-        !button.disabled &&
-        button.getAttribute('data-onboarding-action') === 'continue'
+      return row?.ready === true && (activeStep() === 'broker' || (activeStep() === 'ai' &&
+        button && !button.disabled && button.getAttribute('data-onboarding-action') === 'continue'))
     }, 60000)
-    clickPrimary()
+    if (activeStep() === 'ai') clickPrimary()
     await waitFor('broker step', () => activeStep() === 'broker' ? true : false)
 
     return {
@@ -694,11 +698,9 @@ app.whenReady().then(async () => {
   const homeEnv = app.isPackaged
     ? {
         OPENALICE_HOME: userDataHome,
-        // The app dir itself (Contents/Resources/app with asar:false) — it's
-        // what *contains* default/, ui/dist, src/workspaces, services/uta/dist,
-        // matching how src/core/paths.ts resolves resources (APP_HOME/<dir>).
-        // NOT dirname() — that points one level above the shipped files.
-        OPENALICE_APP_HOME: app.getAppPath(),
+        // External tools need real paths. Code and dependencies stay in
+        // app.asar; shipped Workspace assets/toolchains live beside it.
+        OPENALICE_APP_HOME: join(process.resourcesPath, 'runtime'),
       }
     : {
         OPENALICE_HOME: userDataHome,
@@ -816,6 +818,7 @@ app.whenReady().then(async () => {
         ...process.env,
         ELECTRON_RUN_AS_NODE: '1',
         OPENALICE_CONNECTOR_PORT: String(connectorPort),
+        OPENALICE_TOOL_SOCKET: toolSocketPath,
         OPENALICE_LAUNCHER: 'electron',
         OPENALICE_GUARDIAN_PID: String(process.pid),
         OPENALICE_GUARDIAN_STARTED_AT: String(guardianStartedAt),
@@ -1005,6 +1008,7 @@ app.whenReady().then(async () => {
     width: 1280,
     height: 800,
     title: 'OpenAlice',
+    ...windowChromeOptions(),
     webPreferences: {
       preload: resolve(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1015,6 +1019,7 @@ app.whenReady().then(async () => {
       sandbox: false,
     },
   })
+  configureWindowChrome(win)
   win.webContents.on('preload-error', (_event, preloadPath, error) => {
     console.error(`[guardian] renderer preload failed path=${preloadPath}: ${error.message}`)
   })

@@ -1,3 +1,4 @@
+import { runProjectCli } from './project-cli.ts'
 import { main as runLegacyCommand } from '../bin/openalice.mjs'
 import { isBunStandalone } from './bun-standalone.mjs'
 import { runDependencySetup } from './dependency-setup.mjs'
@@ -21,6 +22,7 @@ export async function main(
   dependencies: CliDependencies = {},
 ): Promise<number> {
   const [command, ...args] = argv
+  if (command === 'exec') return runProjectCli(args)
   const setup = async () => {
     if (!(dependencies.standalone ?? isBunStandalone())) return 0
     return (dependencies.runSetup ?? ((setupArgs: string[]) => runDependencySetup(setupArgs, { quietReady: true })))(args.includes('--json') ? ['--json'] : [])

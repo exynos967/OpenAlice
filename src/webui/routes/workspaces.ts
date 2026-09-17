@@ -1,3 +1,6 @@
+import { createWorkspaceContentRoutes } from './workspace-content.js';
+import { createStickerRoutes } from './stickers.js';
+import { prepareProjectWorkspaces, readProjectWorkspaceSetup } from '../../workspaces/project-workspace-setup.js';
 /**
  * Hono routes for the Workspaces feature, mounted at /api/workspaces.
  *
@@ -6,7 +9,7 @@
  * the original `server/src/index.ts` `handleHttp` switch did.
  */
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join, resolve as resolvePath } from 'node:path';
@@ -107,6 +110,7 @@ import {
   AUTO_QUANT_WORKSPACE_TEMPLATE,
   CHAT_WORKSPACE_TEMPLATE,
 } from '../../workspaces/chat-workspace-resolver.js';
+import { ALICE_HARNESS_SKILLS } from '../../workspaces/alice-harness-policy.js';
 import { TemplateUpgradeError } from '../../workspaces/template-upgrade.js';
 import { HarnessSourceUpgradeError } from '../../workspaces/harness-source-upgrade.js';
 import { WorkspaceAbsorbError } from '../../workspaces/workspace-absorb.js';
@@ -239,6 +243,7 @@ function redactLaunchCommand(argv: readonly string[]): readonly string[] {
 
 /** The 201 body both `/:id/sessions/spawn` and `/quick-chat` return. */
 interface SpawnedSessionBody {
+  readonly surface?: 'terminal' | 'webpi';
   readonly sessionId: string;
   readonly wsId: string;
   readonly name: string;
@@ -263,6 +268,7 @@ export function createWorkspaceRoutes(
   quickChatPreferences: QuickChatWorkspacePreferenceDeps = defaultQuickChatWorkspacePreferenceDeps,
 ): Hono {
   const app = new Hono();
+  app.route('/stickers', createStickerRoutes(svc));
   const headlessSessionInFlight = new Map<string, Promise<OpenHeadlessSessionResult>>();
   const readAutoQuantPreference = () =>
     (quickChatPreferences.readAutoQuantPreferences ?? readAutoQuantPreferences)();
@@ -302,10 +308,14 @@ export function createWorkspaceRoutes(
   });
 
   const resolveDefaultAgentId = async (meta: WorkspaceMeta): Promise<string | undefined> => {
-    const metadata = await readWorkspaceMetadata(meta.dir);
-    if (metadata.ok && metadata.metadata.defaultAgent) {
-      const adapter = svc.adapters.get(metadata.metadata.defaultAgent);
-      if (adapter && isAgentRuntime(adapter)) return metadata.metadata.defaultAgent;
+    const settings = await readWorkspaceRuntimeSettings(meta.dir);
+    if (!settings.ok && settings.reason === 'invalid') {
+      throw new Error(`invalid Workspace runtime settings: ${settings.error}`);
+    }
+    const agent = settings.ok ? resolveWorkspaceRuntimeAgent(settings.settings, 'interactive') : undefined;
+    if (agent) {
+      const adapter = svc.adapters.get(agent);
+      if (adapter && isAgentRuntime(adapter)) return agent;
     }
     const configured = await readWorkspaceDefaultAgent().catch(() => null);
     if (configured) {
@@ -331,6 +341,7 @@ export function createWorkspaceRoutes(
       /** Product-level conversation id. Resolved to a native id only here. */
       readonly resumeId?: string;
       readonly initialPrompt?: string;
+      readonly surface?: 'terminal' | 'webpi';
       readonly title?: string;
       readonly sourceRunId?: string;
       readonly credentialSource?: 'native';
@@ -402,6 +413,10 @@ export function createWorkspaceRoutes(
       return { ok: false, status: 400, body: { error: 'unknown_agent', message: `no adapter: ${agentId}` } };
     }
     const adapter = svc.resolveAdapter(meta, agentId);
+    if (opts.surface === 'webpi' && (!adapter.capabilities.web?.freshSession || !adapter.composeWebCommand)) {
+      return { ok: false, status: 400, body: { error: 'unsupported_surface', message: 'This runtime cannot start a fresh GUI session' } };
+    }
+
     if (requestedIdentity && requestedIdentity.agent !== adapter.id) {
       return { ok: false, status: 400, body: { error: 'resume_wrong_agent' } };
     }
@@ -495,7 +510,7 @@ export function createWorkspaceRoutes(
           ? { metadata: sessionMetadata(opts.createdBy) }
           : {}),
         state: 'running',
-        surface: 'terminal',
+        surface: opts.surface ?? 'terminal',
         ...(fallbackTitle ? { fallbackTitle } : {}),
         ...(opts.sourceRunId ? { sourceRunId: opts.sourceRunId } : {}),
       });
@@ -515,6 +530,14 @@ export function createWorkspaceRoutes(
           agent: adapter.id,
           sessionRecordId: record.id,
         })
+      }
+      if (opts.surface === 'webpi') {
+        operationLease?.release();
+        releaseClaim();
+        const snapshot = await svc.startWebSession(meta, record);
+        if (initialPrompt) await svc.web.prompt(record.id, initialPrompt);
+        releaseClaim();
+        return { ok: true, session: { sessionId: record.id, wsId: id, name: record.name, agent: adapter.id, resumeId: record.resumeId, pid: snapshot.pid ?? 0, startedAt: snapshot.startedAt, title: sessionPreferredTitle(record) ?? null, surface: 'webpi' } };
       }
       const ctx: SessionFactoryContext = {
         ...(resume !== undefined ? { resume } : {}),
@@ -552,7 +575,7 @@ export function createWorkspaceRoutes(
         resumeId: identity.resumeId,
         agent: adapter.id,
         sessionRecordId: record.id,
-        surface: 'terminal',
+        surface: opts.surface ?? 'terminal',
         cause: { kind: 'ui' },
       })
       releaseClaim();
@@ -571,11 +594,12 @@ export function createWorkspaceRoutes(
       };
     } catch (err) {
       releaseClaim();
+      if (opts.surface === 'webpi') await svc.web.stop(record.id, 'GUI launch failed').catch(() => undefined);
       await svc.sessionCoordinator.transition({
         wsId: id,
         resumeId: record.resumeId,
         state: 'paused',
-        surface: 'terminal',
+        surface: opts.surface ?? 'terminal',
       }).catch(() => undefined);
       launcherLogger.error('workspace.session_spawn_failed', { id, err });
       await svc.recordAgentRuntime?.('runtime.spawn_failed', {
@@ -583,7 +607,7 @@ export function createWorkspaceRoutes(
         resumeId: record.resumeId,
         agent: adapter.id,
         sessionRecordId: record.id,
-        surface: 'terminal',
+        surface: opts.surface ?? 'terminal',
         cause: { kind: 'ui' },
         error: (err as Error).message,
       })
@@ -596,12 +620,12 @@ export function createWorkspaceRoutes(
 
   const publicSession = (record: SessionRecord): PublicSession => {
     const terminal = svc.pool.get(record.id);
-    const browser = svc.webPi?.get(record.id) ?? null;
+    const browser = svc.web?.get(record.id) ?? null;
     const identity = svc.resumeRegistry.get(record.resumeId);
     const binding = identity?.runtimeBinding;
     return projectPublicSession(record, {
       terminal,
-      webPi: browser,
+      web: browser,
       headless: svc.isResumeActive(record.resumeId),
       runtimeBinding: binding,
       ...(identity?.displayName ? { displayName: identity.displayName } : {}),
@@ -628,7 +652,7 @@ export function createWorkspaceRoutes(
   ): Promise<OpenHeadlessSessionResult> => {
     await svc.sessionRegistry.ensureLoaded(meta.id);
     const existing = svc.sessionRegistry.findByResumeId(meta.id, resumeId);
-    if (existing && (svc.pool.get(existing.id) || svc.webPi.get(existing.id))) {
+    if (existing && (svc.pool.get(existing.id) || svc.web.get(existing.id))) {
       return { ok: true, created: false, session: publicSession(existing) };
     }
     const identity = svc.resumeRegistry.get(resumeId);
@@ -690,10 +714,10 @@ export function createWorkspaceRoutes(
     }
   };
 
-  const managerWebPiOptions = {
+  const managerWebOptions = {
     appendSystemPrompt: MANAGER_SYSTEM_PROMPT,
     skills: [managerSkillPath(svc.config.launcherRepoRoot)],
-    // WebPi has no TUI in which it could render Pi's trust prompt. Entering the
+    // The Web surface has no TUI in which it could render Pi's trust prompt. Entering the
     // explicit manager surface is the user's approval for its launcher-owned
     // skill and active-office-floor cwd.
     approveProject: true,
@@ -721,8 +745,9 @@ export function createWorkspaceRoutes(
   // ── launcher-owned Workspace manager ───────────────────────────────────
   // The manager's cwd is the active office floor, but it is intentionally not
   // inserted into the business Workspace registry. Its sessions live in the
-  // same durable Session/Resume registries. Pi opens through WebPi; the other
-  // supported agent runtimes keep their native TUI surface.
+  // same durable Session/Resume registries. Pi opens through the Web surface
+  // with the manager contract; the other runtimes keep their native TUI until
+  // they gain a manager-prompt injection path.
   app.get('/manager', async (c) => c.json({ manager: await publicManager() }));
 
   app.post('/manager/quick-start', async (c) => {
@@ -796,9 +821,9 @@ export function createWorkspaceRoutes(
       // A fresh native Pi id is allocated by the ordinary interactive spawn
       // seam. Stop its unused TUI immediately, then reopen that exact native
       // conversation in RPC mode and submit the visible user prompt.
-      svc.pool.disposeToken(record.id, 'switch fresh manager Session to WebPi');
-      await svc.startWebPiSession(meta, record, managerWebPiOptions);
-      const snapshot = await svc.webPi.prompt(record.id, prompt);
+      svc.pool.disposeToken(record.id, 'switch fresh manager Session to Web');
+      await svc.startWebSession(meta, record, managerWebOptions);
+      const snapshot = await svc.web.prompt(record.id, prompt);
       return c.json({
         manager: await publicManager(),
         session: publicSession(record),
@@ -1061,6 +1086,12 @@ export function createWorkspaceRoutes(
     }
   });
 
+  app.get('/project-setup', async (c) => c.json(await readProjectWorkspaceSetup()));
+  app.post('/project-setup/retry', async (c) => {
+    await prepareProjectWorkspaces(svc);
+    return c.json(await readProjectWorkspaceSetup());
+  });
+
   app.post('/chat/initialize', async (c) => {
     try {
       const preference = await quickChatPreferences.readQuickChatPreferences();
@@ -1265,18 +1296,7 @@ export function createWorkspaceRoutes(
       else nextObj['description'] = v;
     }
     if ('defaultAgent' in fields) {
-      const v = fields['defaultAgent'];
-      if (v === null) {
-        delete nextObj['defaultAgent'];
-      } else if (typeof v === 'string') {
-        const adapter = svc.adapters.get(v);
-        if (!adapter || !isAgentRuntime(adapter)) {
-          return c.json({ error: 'invalid_agent', message: `unknown agent runtime: ${v}` }, 400);
-        }
-        nextObj['defaultAgent'] = v;
-      } else {
-        return c.json({ error: 'invalid_agent', message: 'defaultAgent must be a runtime id or null' }, 400);
-      }
+      return c.json({ error: 'invalid_metadata', message: 'Agent preferences belong in runtime-settings, not metadata' }, 400);
     }
     const next = workspaceMetadataSchema.safeParse(nextObj);
     if (!next.success) {
@@ -1392,12 +1412,39 @@ export function createWorkspaceRoutes(
     }
   });
 
-  app.get('/:id/template-upgrade', async (c) => {
+  app.get('/alice-harness/catalog', async (c) => {
+    try { return c.json(await svc.aliceHarnessUpgrades.projectHarnessCatalog()); }
+    catch (error) { return c.json({ error: (error as Error).message }, 500); }
+  });
+
+  app.get('/:id/alice-harness/skills/:skill', async (c) => {
+    try { return c.json(await svc.aliceHarnessUpgrades.skillProjection(c.req.param('id'), c.req.param('skill'))); }
+    catch (error) { return c.json({ error: (error as Error).message }, error instanceof TemplateUpgradeError && error.code === 'not_found' ? 404 : 400); }
+  });
+
+  app.get('/:id/alice-harness', async (c) => {
+    try { return c.json(await svc.aliceHarnessUpgrades.harnessStatus(c.req.param('id'))); }
+    catch (error) { return c.json({ error: (error as Error).message }, error instanceof TemplateUpgradeError && error.code === 'not_found' ? 404 : 400); }
+  });
+  app.put('/:id/alice-harness/config', async (c) => {
+    try {
+      await svc.aliceHarnessUpgrades.configureHarness(c.req.param('id'), await c.req.json());
+      return c.json({ ok: true });
+    } catch (error) { return c.json({ error: (error as Error).message }, error instanceof TemplateUpgradeError && error.code === 'busy' ? 409 : 400); }
+  });
+
+  const projectionSchema = z.object({ skill: z.enum(ALICE_HARNESS_SKILLS), action: z.enum(['install', 'update', 'remove', 'restore']) }).strict();
+  for (const [route, manager] of [['template-upgrade', svc.templateUpgrades], ['alice-harness-upgrade', svc.aliceHarnessUpgrades]] as const) {
+  app.get(`/:id/${route}`, async (c) => {
     const id = c.req.param('id');
     if (!validId(id)) return c.json({ error: 'not_found' }, 404);
     try {
-      return c.json({ plan: await svc.templateUpgrades.plan(id) });
+      const requested = c.req.query('skill') || c.req.query('action');
+      const projection = requested ? projectionSchema.parse({ skill: c.req.query('skill'), action: c.req.query('action') }) : undefined;
+      if (projection && route !== 'alice-harness-upgrade') return c.json({ error: 'bad_request' }, 400);
+      return c.json({ plan: await manager.plan(id, projection) });
     } catch (err) {
+      if (err instanceof z.ZodError) return c.json({ error: 'bad_request', message: 'Invalid Skill operation' }, 400);
       if (err instanceof TemplateUpgradeError) {
         const status = err.code === 'not_found' ? 404
           : err.code === 'unsupported' || err.code === 'busy' ? 409
@@ -1409,7 +1456,7 @@ export function createWorkspaceRoutes(
     }
   });
 
-  app.post('/:id/template-upgrade', async (c) => {
+  app.post(`/:id/${route}`, async (c) => {
     const id = c.req.param('id');
     if (!validId(id)) return c.json({ error: 'not_found' }, 404);
     const body = await safeJson(c);
@@ -1424,12 +1471,16 @@ export function createWorkspaceRoutes(
             entry[1] === 'workspace' || entry[1] === 'template'))
       : undefined;
     try {
-      const result = await svc.templateUpgrades.apply(id, {
+      const projection = fields['projection'] ? projectionSchema.parse(fields['projection']) : undefined;
+      if (projection && route !== 'alice-harness-upgrade') return c.json({ error: 'bad_request' }, 400);
+      const result = await manager.apply(id, {
+        projection,
         planDigest: fields['planDigest'],
         ...(resolutions ? { resolutions } : {}),
       });
       return c.json({ result, workspace: await svc.publicMeta(svc.registry.get(id)!) });
     } catch (err) {
+      if (err instanceof z.ZodError) return c.json({ error: 'bad_request', message: 'Invalid Skill operation' }, 400);
       if (err instanceof TemplateUpgradeError) {
         const status = err.code === 'not_found' ? 404
           : err.code === 'busy' || err.code === 'staged_changes' || err.code === 'stale_plan'
@@ -1441,6 +1492,8 @@ export function createWorkspaceRoutes(
       return c.json({ error: 'upgrade_apply_failed', message: (err as Error).message }, 500);
     }
   });
+
+  }
 
   app.get('/:id/source-upgrade', async (c) => {
     const id = c.req.param('id');
@@ -1642,6 +1695,8 @@ export function createWorkspaceRoutes(
     });
   });
 
+  app.route('/', createWorkspaceContentRoutes(id => svc.registry.get(id)?.dir));
+
   app.get('/:id/file', async (c) => {
     const id = c.req.param('id');
     if (!validId(id)) return c.json({ error: 'not_found' }, 404);
@@ -1672,7 +1727,8 @@ export function createWorkspaceRoutes(
   app.get('/:id/resumes', async (c) => {
     const id = c.req.param('id');
     if (!validId(id)) return c.json({ error: 'not_found' }, 404);
-    const directory = await svc.sessionDirectory(id, 100);
+    const resumeId = c.req.query('resumeId');
+    const directory = await svc.sessionDirectory(id, 100, resumeId || undefined);
     if (!directory) return c.json({ error: 'workspace_not_found' }, 404);
     return c.json(directory);
   });
@@ -1776,7 +1832,7 @@ export function createWorkspaceRoutes(
       && (
         interactive.state === 'running'
         || svc.pool.get(interactive.id)
-        || svc.webPi?.has(interactive.id)
+        || svc.web?.has(interactive.id)
       )
     ) {
       return c.json({
@@ -1964,6 +2020,7 @@ export function createWorkspaceRoutes(
   // Workspace template; the native Coding Agent remains the worker.
   // Body: { prompt, agent?, targetWsId?, template? }
   app.post('/quick-chat', async (c) => {
+    let surface: 'terminal' | 'webpi' | undefined;
     let prompt: string;
     let agentId: string | undefined;
     let credentialSource: 'native' | undefined;
@@ -1975,6 +2032,8 @@ export function createWorkspaceRoutes(
     try {
       const body = await safeJson(c);
       const fields = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+      if (fields['surface'] !== undefined && fields['surface'] !== 'terminal' && fields['surface'] !== 'webpi') return c.json({ error: 'invalid_surface' }, 400);
+      surface = fields['surface'] as typeof surface;
       const seed = parseSeedPrompt(fields['prompt']);
       if (seed === null) return c.json({ error: 'prompt_required' }, 400);
       if ('error' in seed) return c.json(seed, 400);
@@ -2101,6 +2160,7 @@ export function createWorkspaceRoutes(
     }
 
     const spawn = await spawnInteractiveSession(meta, {
+      surface,
       ...(agentId !== undefined ? { agentId } : {}),
       ...(credentialSource !== undefined ? { credentialSource } : {}),
       ...(credentialSlug !== undefined ? { credentialSlug } : {}),
@@ -2130,6 +2190,9 @@ export function createWorkspaceRoutes(
       const live = svc.pool.get(token);
       if (!record && !live) return c.json({ error: 'not_found' }, 404);
 
+      const claimed = record ? (svc.claimResume?.(record.resumeId) ?? true) : false;
+      if (record && !claimed) return c.json({ error: 'resume_busy', message: 'A background turn owns this Session' }, 409);
+      try {
       let scrollbackRel: string | null = null;
       if (record?.agent === 'shell' && live) {
         try {
@@ -2141,9 +2204,10 @@ export function createWorkspaceRoutes(
           launcherLogger.warn('scrollback.dump_failed', { id, token, err });
         }
       }
-      const wasTerminalRunning = svc.pool.disposeToken(token, action === 'pause' ? 'paused' : 'tab stop');
-      const wasWebPiRunning = await svc.webPi?.stop(token, action === 'pause' ? 'paused' : 'tab stop') ?? false;
-      const wasRunning = wasTerminalRunning || wasWebPiRunning;
+      const wasTerminalRunning = Boolean(live);
+      if (live) await live.disposeAndWait(action === 'pause' ? 'paused' : 'tab stop');
+      const wasWebRunning = await svc.web?.stop(token, action === 'pause' ? 'paused' : 'tab stop') ?? false;
+      const wasRunning = wasTerminalRunning || wasWebRunning;
       if (record) {
         const patch: Partial<SessionRecord> = {
           state: 'paused',
@@ -2169,11 +2233,12 @@ export function createWorkspaceRoutes(
           resumeId: record.resumeId,
           agent: record.agent,
           sessionRecordId: record.id,
-          surface: wasWebPiRunning && !wasTerminalRunning ? 'webpi' : 'terminal',
+          surface: wasWebRunning && !wasTerminalRunning ? 'webpi' : 'terminal',
           status: 'paused',
         })
       }
       return c.json({ ok: true, wasRunning });
+      } finally { if (claimed && record) svc.releaseResume?.(record.resumeId); }
     });
   }
 
@@ -2188,7 +2253,7 @@ export function createWorkspaceRoutes(
     if (
       record.state !== 'paused'
       || svc.pool.get(token)
-      || svc.webPi?.has(token)
+      || svc.web?.has(token)
     ) {
       return c.json({
         error: 'session_not_paused',
@@ -2301,7 +2366,7 @@ export function createWorkspaceRoutes(
       }
       // Choosing the terminal surface is an explicit handoff. Never leave Pi's
       // RPC host and PTY alive against the same native session file.
-      if (svc.webPi?.has(token)) await svc.webPi.stop(token, 'switch to terminal');
+      if (svc.web?.has(token)) await svc.web.stop(token, 'switch to terminal');
       const meta = svc.resolveRuntimeWorkspace?.(id) ?? svc.registry.get(id);
       if (!meta) return c.json({ error: 'workspace_not_found' }, 404);
       const adapter = svc.adapters.get(record.agent);
@@ -2476,60 +2541,70 @@ export function createWorkspaceRoutes(
     }
   });
 
-  // WebPi is a presentation of an existing Pi Session, not another runtime.
-  // The four routes below expose Pi's own RPC state/messages without adapting
-  // them into OpenAlice message blocks.
-  app.post('/:id/sessions/:sid/webpi/open', async (c) => {
+  // The Web surface is a presentation of an existing Session through its
+  // runtime's structured protocol, not another runtime. The routes below
+  // expose the neutral live snapshot; adapters and transports own the wire.
+  const webSessionContext = (c: Context) => {
     const id = c.req.param('id');
     const token = c.req.param('sid');
-    if (!validId(id) || !validId(token)) return c.json({ error: 'not_found' }, 404);
+    if (!validId(id) || !validId(token)) return null;
+    const record = svc.sessionRegistry.get(id, token);
+    if (!record) return null;
+    return { id, token, record };
+  };
+
+  app.post('/:id/sessions/:sid/web/open', async (c) => {
+    const ctx = webSessionContext(c);
+    if (!ctx) return c.json({ error: 'not_found' }, 404);
+    const { id, token, record } = ctx;
     // Older embedders/tests may provide only the business registry. Keep the
     // ordinary Workspace path compatible while the launcher-owned manager is
     // resolved through the newer service seam.
     const meta = svc.resolveRuntimeWorkspace?.(id) ?? svc.registry.get(id);
-    const record = svc.sessionRegistry.get(id, token);
-    if (!meta || !record) return c.json({ error: 'not_found' }, 404);
-    if (record.agent !== 'pi') {
-      return c.json({ error: 'unsupported_surface', message: 'WebPi is available only for Pi Sessions' }, 409);
+    if (!meta) return c.json({ error: 'not_found' }, 404);
+    const adapter = svc.adapters.get(record.agent);
+    if (!adapter) return c.json({ error: 'unknown_agent' }, 500);
+    if (!adapter.capabilities.web || !adapter.composeWebCommand) {
+      return c.json({
+        error: 'unsupported_surface',
+        message: `${adapter.displayName} has no Web conversation surface; open it in the terminal instead`,
+      }, 409);
     }
     if (svc.isResumeActive(record.resumeId)) {
       return c.json({ error: 'resume_busy', message: 'this conversation has a running headless turn' }, 409);
     }
-    const adapter = svc.adapters.get('pi');
-    if (!adapter) return c.json({ error: 'unknown_agent' }, 500);
     try {
       await prepareAgentRuntimeWorkspace(adapter, {
         wsId: id,
         cwd: meta.dir,
         launcherRepoRoot: svc.config.launcherRepoRoot,
       });
-      if (svc.pool.get(token)) svc.pool.disposeToken(token, 'switch to WebPi');
-      const snapshot = await svc.startWebPiSession(
+      const snapshot = await svc.startWebSession(
         meta,
         record,
-        id === svc.managerWorkspace?.id ? managerWebPiOptions : undefined,
+        id === svc.managerWorkspace?.id ? managerWebOptions : undefined,
       );
       return c.json({ ok: true, snapshot, session: publicSession(record) });
     } catch (err) {
+      if (err instanceof HeadlessResumeError) {
+        return c.json({ error: 'resume_busy', message: err.message }, 409);
+      }
       await svc.sessionRegistry.update(id, token, {
         state: 'paused',
         surface: 'webpi',
         lastActiveAt: new Date().toISOString(),
       }).catch(() => undefined);
       if (err instanceof AgentCredentialError) return c.json(err.toBody(), 400);
-      launcherLogger.error('webpi.open_failed', { id, token, err });
-      return c.json({ error: 'webpi_open_failed', message: (err as Error).message }, 500);
+      launcherLogger.error('web_session.open_failed', { id, token, err });
+      return c.json({ error: 'web_open_failed', message: (err as Error).message }, 500);
     }
   });
 
-  app.get('/:id/sessions/:sid/webpi', (c) => {
-    const id = c.req.param('id');
-    const token = c.req.param('sid');
-    if (!validId(id) || !validId(token)) return c.json({ error: 'not_found' }, 404);
-    const record = svc.sessionRegistry.get(id, token);
-    if (!record) return c.json({ error: 'not_found' }, 404);
-    const snapshot = svc.webPi.get(token);
-    if (!snapshot) return c.json({ error: 'webpi_not_running' }, 409);
+  app.get('/:id/sessions/:sid/web', (c) => {
+    const ctx = webSessionContext(c);
+    if (!ctx) return c.json({ error: 'not_found' }, 404);
+    const snapshot = svc.web.get(ctx.token);
+    if (!snapshot) return c.json({ error: 'web_not_running' }, 409);
     const knownRevision = Number.parseInt(c.req.query('revision') ?? '', 10);
     if (Number.isSafeInteger(knownRevision) && knownRevision === snapshot.revision) {
       return c.json({ unchanged: true, revision: snapshot.revision });
@@ -2537,36 +2612,53 @@ export function createWorkspaceRoutes(
     return c.json({ snapshot });
   });
 
-  app.post('/:id/sessions/:sid/webpi/prompt', async (c) => {
-    const id = c.req.param('id');
-    const token = c.req.param('sid');
-    if (!validId(id) || !validId(token)) return c.json({ error: 'not_found' }, 404);
-    const record = svc.sessionRegistry.get(id, token);
-    if (!record || record.agent !== 'pi') return c.json({ error: 'not_found' }, 404);
+  app.post('/:id/sessions/:sid/web/prompt', async (c) => {
+    const ctx = webSessionContext(c);
+    if (!ctx) return c.json({ error: 'not_found' }, 404);
     const body = await safeJson(c).catch(() => null);
     const message = body && typeof body === 'object' ? (body as Record<string, unknown>)['message'] : null;
     if (typeof message !== 'string' || !message.trim()) {
       return c.json({ error: 'bad_request', message: 'message is required' }, 400);
     }
     try {
-      const snapshot = await svc.webPi.prompt(token, message);
-      await svc.sessionRegistry.update(id, token, { lastActiveAt: new Date().toISOString() });
+      const snapshot = await svc.web.prompt(ctx.token, message);
+      await svc.sessionRegistry.update(ctx.id, ctx.token, { lastActiveAt: new Date().toISOString() });
       return c.json({ ok: true, snapshot });
     } catch (err) {
-      return c.json({ error: 'webpi_prompt_failed', message: (err as Error).message }, 409);
+      return c.json({ error: 'web_prompt_failed', message: (err as Error).message }, 409);
     }
   });
 
-  app.post('/:id/sessions/:sid/webpi/abort', async (c) => {
-    const id = c.req.param('id');
-    const token = c.req.param('sid');
-    if (!validId(id) || !validId(token)) return c.json({ error: 'not_found' }, 404);
-    const record = svc.sessionRegistry.get(id, token);
-    if (!record || record.agent !== 'pi') return c.json({ error: 'not_found' }, 404);
+  app.post('/:id/sessions/:sid/web/abort', async (c) => {
+    const ctx = webSessionContext(c);
+    if (!ctx) return c.json({ error: 'not_found' }, 404);
     try {
-      return c.json({ ok: true, snapshot: await svc.webPi.abort(token) });
+      return c.json({ ok: true, snapshot: await svc.web.abort(ctx.token) });
     } catch (err) {
-      return c.json({ error: 'webpi_abort_failed', message: (err as Error).message }, 409);
+      return c.json({ error: 'web_abort_failed', message: (err as Error).message }, 409);
+    }
+  });
+
+  // Answer a runtime permission/question request with one of the options the
+  // runtime itself offered, or free text for a question. The host and transport
+  // validate the answer against the pending request.
+  app.post('/:id/sessions/:sid/web/respond', async (c) => {
+    const ctx = webSessionContext(c);
+    if (!ctx) return c.json({ error: 'not_found' }, 404);
+    const body = await safeJson(c).catch(() => null);
+    const fields = body && typeof body === 'object' ? body as Record<string, unknown> : {};
+    const requestId = fields['requestId'];
+    const optionId = fields['optionId'];
+    const text = fields['text'];
+    if (typeof requestId !== 'string' || !requestId || typeof optionId !== 'string' || (text !== undefined && typeof text !== 'string')) {
+      return c.json({ error: 'bad_request', message: 'requestId and optionId are required' }, 400);
+    }
+    try {
+      const snapshot = await svc.web.respond(ctx.token, requestId, optionId, text as string | undefined);
+      await svc.sessionRegistry.update(ctx.id, ctx.token, { lastActiveAt: new Date().toISOString() });
+      return c.json({ ok: true, snapshot });
+    } catch (err) {
+      return c.json({ error: 'web_respond_failed', message: (err as Error).message }, 409);
     }
   });
 
@@ -2904,8 +2996,8 @@ export function createWorkspaceRoutes(
     const record = svc.sessionRegistry.get(id, token);
     if (!record) return c.json({ error: 'not_found' }, 404);
     const wasTerminalRunning = svc.pool.disposeToken(token, 'session deleted');
-    const wasWebPiRunning = await svc.webPi?.stop(token, 'session deleted') ?? false;
-    const wasRunning = wasTerminalRunning || wasWebPiRunning;
+    const wasWebRunning = await svc.web?.stop(token, 'session deleted') ?? false;
+    const wasRunning = wasTerminalRunning || wasWebRunning;
     if (record.scrollbackFile) {
       await svc.scrollbackStore.remove(record.scrollbackFile);
     }
@@ -2921,7 +3013,7 @@ export function createWorkspaceRoutes(
         resumeId: record.resumeId,
         agent: record.agent,
         sessionRecordId: record.id,
-        surface: wasWebPiRunning && !wasTerminalRunning ? 'webpi' : 'terminal',
+        surface: wasWebRunning && !wasTerminalRunning ? 'webpi' : 'terminal',
         status: 'interrupted',
       });
     }

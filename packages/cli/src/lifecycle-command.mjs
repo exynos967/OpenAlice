@@ -18,6 +18,7 @@ export const ROOT_COMMANDS = Object.freeze([
   { name: 'version', description: 'Print the OpenAlice product and install version' },
   { name: 'tui', description: 'Open the local Supervisor TUI' },
   { name: 'create', description: 'Create a named AliceProject (Trader or Nano)' },
+  { name: 'exec', description: 'Run a capability CLI in the selected AliceProject' },
   { name: 'project', description: 'List, select, or transfer AliceProjects' },
   { name: 'machine', description: 'Register SSH hosts and inspect their AliceProjects' },
   { name: 'up', description: 'Start a persistent local Runtime in the background' },

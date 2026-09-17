@@ -74,6 +74,7 @@ describe('CLI launchers and payload', () => {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({
         description: 'test manifest',
+        warnings: ['Skills are outdated; run alice harness upgrade --apply.'],
         groupDescriptions: {
           market: 'Discover symbols and bar sources',
         },
@@ -93,15 +94,17 @@ describe('CLI launchers and payload', () => {
       server.listen(socketPath, resolve)
     })
     try {
-      const { stdout } = await runCli('alice', [], {
+      const { stdout, stderr } = await runCli('alice', [], {
           ...process.env,
           AQ_WS_ID: 'ws1',
           OPENALICE_TOOL_SOCKET: socketPath,
           OPENALICE_TOOL_URL: '/cli',
           OPENALICE_CLI_DEBUG: '1',
       })
-      expect(stdout).toContain('[openalice-cli-debug] runtime')
-      expect(stdout).toContain('[openalice-cli-debug] socket.response')
+      expect(stderr).toContain('[openalice-cli-debug] runtime')
+      expect(stderr).toContain('[openalice-cli-debug] socket.response')
+      expect(stderr).toContain('Warning: Skills are outdated; run alice harness upgrade --apply.')
+      expect(stdout).not.toContain('Warning:')
       expect(stdout).toContain('OpenAlice CLI')
       expect(stdout).toContain('market')
       expect(stdout).toContain('Discover symbols and bar sources')
@@ -141,13 +144,14 @@ describe('CLI launchers and payload', () => {
       server.listen(socketPath, resolve)
     })
     try {
-      const { stdout } = await runCli('alice-workspace', ['inbox'], {
+      const { stdout, stderr } = await runCli('alice-workspace', ['inbox'], {
         ...process.env,
         AQ_WS_ID: 'ws1',
         OPENALICE_TOOL_SOCKET: socketPath,
         OPENALICE_TOOL_URL: '/cli',
       })
-      expect(stdout).toContain('alice-workspace inbox <verb>')
+      expect(stdout).toContain('alice inbox <verb>')
+      expect(stderr).toContain('compatibility alias')
       expect(stdout).toContain('Deliver reports to the human Inbox')
       expect(stdout).toContain('push')
     } finally {
@@ -247,8 +251,8 @@ describe('CLI launchers and payload', () => {
       expect(help.stdout).toContain('--task-id <value> (repeatable)')
       expect(help.stdout).not.toContain('--task-id <array>')
       expect(help.stdout).not.toContain('--issueId')
-      expect(help.stdout).toContain('--doc <value> (repeatable)')
-      expect(help.stdout).not.toContain('--docs')
+      expect(help.stdout).toContain('--docs <value> (repeatable)')
+      expect(help.stdout).not.toContain('--doc <value>')
       expect(help.stdout).toContain('--meta <key=value> (repeatable)')
       expect(help.stdout).not.toContain('--metadata-filter')
 
@@ -256,7 +260,7 @@ describe('CLI launchers and payload', () => {
         'provenance', 'show', '--issue-id', 'audit', '--account-id', 'alpaca-paper',
         '--await', '--reconstruct',
         '--task-id', 'run-a', '--task-id', 'run-b',
-        '--doc', 'research/a.md', '--meta', 'ticker=AAPL',
+        '--docs', '{"path":"research/a.md"}' , '--meta', 'ticker=AAPL',
       ], env)
       expect(invocation).toEqual({
         tool: 'provenance_show',
@@ -438,4 +442,43 @@ describe('CLI launchers and payload', () => {
     expect(cmd).toContain('openalice-cli.cjs')
     expect(cmd).toContain('%*')
   })
+})
+
+it('publishes a Markdown body-file through the real CLI without shell interpolation or attachment flags', async () => {
+  const { createMemoryInboxStore } = await import('../../core/inbox-store.js')
+  const { inboxPushFactory } = await import('../../tool/inbox-push.js')
+  const dir = await mkdtemp(join(tmpdir(), 'inbox-cli-body-'))
+  const store = createMemoryInboxStore()
+  const body = '# Close report\n\nCash $971. [[report.pdf]]\n\nAfter the file.\n'
+  await writeFile(join(dir, 'message.md'), body)
+  const tool = inboxPushFactory.build({ workspaceId: 'ws1', workspaceLabel: 'Test', inboxStore: store, entityStore: {} as never })
+  const server = createServer((req, res) => {
+    res.setHeader('content-type', 'application/json')
+    if (req.method !== 'POST') {
+      res.end(JSON.stringify({ groups: { inbox: { push: { tool: 'inbox_push', description: 'Publish Markdown', schema: { type: 'object', required: ['body'], properties: { body: { type: 'string' } } } } } } }))
+      return
+    }
+    const chunks: Buffer[] = []
+    req.on('data', chunk => chunks.push(chunk))
+    req.on('end', async () => {
+      const input = JSON.parse(Buffer.concat(chunks).toString())
+      const result = await tool.execute!(input.args, { toolCallId: 'cli', messages: [] })
+      res.end(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(result) }] }))
+    })
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address() as { port: number }
+    await runCli('alice', ['inbox', 'push', '--body-file', join(dir, 'message.md')], {
+      ...process.env, AQ_WS_ID: 'ws1', OPENALICE_TOOL_SOCKET: '', OPENALICE_TOOL_URL: `http://127.0.0.1:${address.port}/cli`,
+    })
+    const { entries } = await store.read()
+    expect(entries).toHaveLength(1)
+    expect(entries[0].body).toBe(body)
+    expect(entries[0]).not.toHaveProperty('docs')
+    expect(entries[0]).not.toHaveProperty('comments')
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    await rm(dir, { recursive: true, force: true })
+  }
 })

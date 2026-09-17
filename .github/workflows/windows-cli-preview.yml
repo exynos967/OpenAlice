@@ -29,6 +29,12 @@ on:
       neutral_inputs:
         type: boolean
         default: false
+      dev_broker_packs:
+        type: boolean
+        default: false
+      neutral_artifact:
+        type: string
+        default: rolling-dev-neutral-inputs
       candidate_run:
         type: string
         default: ''
@@ -76,17 +82,24 @@ jobs:
         if: inputs.candidate_run == ''
       - run: pnpm build:server
         if: inputs.candidate_run == '' && !inputs.neutral_inputs
-      - name: Reuse shared server inputs on dev
+      - name: Reuse shared server inputs
         if: inputs.candidate_run == '' && inputs.neutral_inputs
         uses: actions/download-artifact@v4
         with:
-          name: rolling-dev-neutral-inputs
+          name: ${{ inputs.neutral_artifact }}
           path: dist/dev-neutral-inputs
       - name: Verify shared server inputs
         if: inputs.candidate_run == '' && inputs.neutral_inputs
         run: node scripts/prepare-cli-neutral-inputs.mjs verify --repository-root . --input-dir dist/dev-neutral-inputs --commit "${{ github.sha }}" --install
+      - uses: actions/download-artifact@v4
+        if: inputs.dev_broker_packs && inputs.candidate_run == ''
+        with:
+          name: dev-broker-win32-${{ matrix.arch }}
+          path: dist/dev-broker-packs
       - name: Assemble preview before native acceptance
         if: inputs.candidate_run == ''
+        env:
+          OPENALICE_DEV_COMMIT: ${{ inputs.dev_broker_packs && github.sha || '' }}
         run: bun scripts/build-windows-cli-preview.ts ${{ matrix.arch }}
       - name: Preserve complete candidate for reproduction
         id: preserve

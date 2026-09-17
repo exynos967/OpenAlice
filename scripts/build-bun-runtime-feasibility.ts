@@ -1,3 +1,4 @@
+import { runtimeCompileOptions } from './bun-compile-options.js'
 import { createServer } from 'node:net'
 import { mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
@@ -46,8 +47,7 @@ const build = await Bun.build({
   entrypoints: [join(repositoryRoot, 'packages/cli/bin/openalice-bun.ts')],
   compile: {
     outfile: executablePath,
-    autoloadBunfig: false,
-    autoloadDotenv: false,
+    ...runtimeCompileOptions,
   },
   define: {
     'globalThis.__OPENALICE_BUILD_VERSION__': JSON.stringify(product.version),
@@ -122,6 +122,10 @@ try {
       && status.componentDetail?.connector?.state === 'ready'
   ))
   readyDurationMs = Math.round(performance.now() - runtimeStartedAt)
+  const projectBarsHelp = runProbe(['exec', '--home', smokeHome, 'alice', 'market', 'bars', '--help'], smokeEnvironment)
+  if (!projectBarsHelp.stdout.includes('--bar-id') || !projectBarsHelp.stdout.includes('--output')) {
+    throw new Error('Native Project CLI did not discover raw market bars through the running Alice gateway')
+  }
   const initialPids = runtimePids(initialStatus)
   if (new Set(initialPids).size !== 4) {
     throw new Error(`Guardian/Alice/UTA/Connector did not have four distinct PIDs: ${initialPids}`)

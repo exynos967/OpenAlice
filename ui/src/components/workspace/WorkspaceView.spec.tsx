@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { i18n } from '../../i18n'
-import type { SessionRecord } from './api'
+import { getWorkspaceSessionDirectory, type SessionRecord } from './api'
+vi.mock('./api', async (original) => ({ ...await original<typeof import('./api')>(), getWorkspaceSessionDirectory: vi.fn(async () => ({ sessions: [] })) }))
 import { WorkspaceView } from './WorkspaceView'
 
 const viewMocks = vi.hoisted(() => ({
@@ -28,7 +29,7 @@ vi.mock('./Terminal', () => ({
     return <div data-testid="terminal-view" />
   },
 }))
-vi.mock('./WebPiView', () => ({ WebPiView: () => null }))
+vi.mock('./WebSessionView', () => ({ WebSessionView: () => null }))
 
 function session(index: number, state: SessionRecord['state']): SessionRecord {
   return {
@@ -58,72 +59,14 @@ beforeEach(async () => {
 
 afterEach(cleanup)
 
-describe('WorkspaceView Session library', () => {
-  it('keeps a large Workspace searchable and routes running and paused rows correctly', () => {
-    const onSpawnFresh = vi.fn()
-    const onResume = vi.fn()
-    const onSelectSession = vi.fn()
-    const sessions = Array.from({ length: 12 }, (_, offset) => (
-      session(offset + 1, offset % 3 === 0 ? 'running' : 'paused')
-    ))
-
-    render(
-      <WorkspaceView
-        wsId="chat-1"
-        sessionId={null}
-        activeRecord={null}
-        sessions={sessions}
-        onSpawnFresh={onSpawnFresh}
-        onResume={onResume}
-        onOpenWebPi={vi.fn()}
-        onSelectSession={onSelectSession}
-        onSessionLost={vi.fn()}
-      />,
-    )
-
-    expect(screen.getByRole('heading', { name: 'Sessions' })).toBeTruthy()
-    expect(screen.getByText('12', { selector: '.workspace-session-library-count' })).toBeTruthy()
-    expect(screen.getAllByRole('button', { name: /^(Open|Resume) Conversation/ })).toHaveLength(12)
-    expect(document.querySelector('[data-agent-runtime-icon="pi"]')).toBeTruthy()
-    expect(document.querySelector('[data-agent-runtime-icon="opencode"]')).toBeTruthy()
-
-    fireEvent.change(screen.getByRole('searchbox', { name: 'Search sessions' }), {
-      target: { value: 'Conversation 10' },
-    })
-    expect(screen.getByRole('button', { name: 'Open Conversation 10' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'Resume Conversation 9' })).toBeNull()
-
-    fireEvent.change(screen.getByRole('searchbox', { name: 'Search sessions' }), {
-      target: { value: '' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Running: 4' }))
-    const results = screen.getByRole('button', { name: 'Open Conversation 10' }).closest('.workspace-session-results')
-    expect(results).toBeTruthy()
-    expect(within(results as HTMLElement).getAllByRole('button')).toHaveLength(4)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Open Conversation 10' }))
-    expect(onSelectSession).toHaveBeenCalledWith('session-10')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Paused: 8' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Resume Conversation 12' }))
-    expect(onResume).toHaveBeenCalledWith('session-12')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Start a new session' }))
-    expect(onSpawnFresh).toHaveBeenCalledTimes(1)
-  })
-})
-
 describe('WorkspaceView Files panel', () => {
   const renderWorkspace = () => render(
     <WorkspaceView
       wsId="chat-1"
       sessionId={null}
       activeRecord={null}
-      sessions={[]}
-      onSpawnFresh={vi.fn()}
       onResume={vi.fn()}
-      onOpenWebPi={vi.fn()}
-      onSelectSession={vi.fn()}
+      onOpenWeb={vi.fn()}
       onSessionLost={vi.fn()}
     />,
   )
@@ -143,11 +86,8 @@ describe('WorkspaceView Files panel', () => {
         wsId="chat-1"
         sessionId={null}
         activeRecord={null}
-        sessions={[]}
-        onSpawnFresh={vi.fn()}
         onResume={vi.fn()}
-        onOpenWebPi={vi.fn()}
-        onSelectSession={vi.fn()}
+        onOpenWeb={vi.fn()}
         onSessionLost={vi.fn()}
       />,
     )
@@ -184,32 +124,18 @@ describe('WorkspaceView paused Session recovery', () => {
         wsId="chat-1"
         sessionId={paused.id}
         activeRecord={paused}
-        sessions={[paused]}
-        onSpawnFresh={vi.fn()}
         onResume={onResume}
-        onOpenWebPi={vi.fn(async () => undefined)}
-        onSelectSession={vi.fn()}
+        onOpenWeb={vi.fn(async () => undefined)}
         onSessionLost={vi.fn()}
       />,
     )
 
-    expect(screen.getByText('Session paused')).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'Conversation 2' })).toBeTruthy()
-    expect(screen.getByText('deepseek-1')).toBeTruthy()
-    expect(screen.getByText('deepseek-v4-flash')).toBeTruthy()
-    expect(screen.getByText('high reasoning')).toBeTruthy()
-    const details = screen.getByText('Session details').closest('details') as HTMLDetailsElement
-    expect(details.open).toBe(false)
-
-    fireEvent.click(screen.getByText('Session details'))
-    expect(details.open).toBe(true)
-    expect(screen.getByText('Transcript')).toBeTruthy()
-    expect(screen.getByText('resume-2')).toBeTruthy()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Resume in TUI' }))
-
     expect((await screen.findByRole('alert')).textContent).toContain('Pi CLI login is required')
-    expect((screen.getByRole('button', { name: 'Resume in TUI' }) as HTMLButtonElement).disabled).toBe(false)
+    expect(onResume).toHaveBeenCalledOnce()
+    expect(screen.queryByText('Session paused')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await vi.waitFor(() => expect(onResume).toHaveBeenCalledTimes(2))
+
   })
 })
 
@@ -223,13 +149,10 @@ describe('WorkspaceView terminal canvas', () => {
         wsId="auto-quant"
         sessionId={activeRecord.id}
         activeRecord={activeRecord}
-        sessions={[activeRecord]}
         label="AutoQuant"
         terminalHeaderActions={headerActions}
-        onSpawnFresh={vi.fn()}
         onResume={vi.fn()}
-        onOpenWebPi={vi.fn()}
-        onSelectSession={vi.fn()}
+        onOpenWeb={vi.fn()}
         onSessionLost={vi.fn()}
       />,
     )
@@ -239,7 +162,6 @@ describe('WorkspaceView terminal canvas', () => {
       label: 'AutoQuant',
       sessionLabel: 'Conversation 2',
       headerActions,
-      chrome: 'canvas',
     }))
   })
 })

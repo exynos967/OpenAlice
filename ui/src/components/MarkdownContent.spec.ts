@@ -3,6 +3,20 @@ import { describe, expect, it } from 'vitest'
 import { renderMarkdownHtml } from './MarkdownContent'
 
 describe('renderMarkdownHtml', () => {
+  it('lets the owning surface route relative document links without rewriting external links or anchors', () => {
+    const html = renderMarkdownHtml('[Guide](docs/guide.md) [Web](https://example.com) [Section](#section)', {
+      resolveRelativeHref: href => `/chat/workspaces/one/view/${encodeURIComponent(href)}`,
+    })
+    expect(html).toContain('href="/chat/workspaces/one/view/docs%2Fguide.md"')
+    expect(html).toContain('href="https://example.com"')
+    expect(html).toContain('href="#section"')
+  })
+
+  it('does not let a link resolver bypass URL sanitization', () => {
+    const html = renderMarkdownHtml('[Guide](guide.md)', { resolveRelativeHref: () => 'javascript:alert(1)' })
+    expect(html).not.toContain('javascript:')
+  })
+
   it('keeps GFM strikethrough enabled by default', () => {
     const html = renderMarkdownHtml('Keep ~~this~~ struck.')
 
@@ -66,4 +80,13 @@ describe('renderMarkdownHtml', () => {
 
     expect(html).toContain('<button type="button" class="code-copy-btn"')
   })
+})
+
+it('renders market cards with exact-case identities and keeps unsupported syntax literal', () => {
+  const path = 'market/okx|BTC/USDT:USDT/4h'
+  const html = renderMarkdownHtml(`Before [[${path}]] After`, { fileHrefs: { [path]: '#chart' } })
+  expect(html).toContain('data-file-path="market/okx|BTC/USDT:USDT/4h"')
+  expect(html).toContain('BTC/USDT:USDT · 4h')
+  expect(html).not.toContain('<img')
+  expect(renderMarkdownHtml('[[market/foo/2m]]', { fileHrefs: {} })).toContain('[[market/foo/2m]]')
 })

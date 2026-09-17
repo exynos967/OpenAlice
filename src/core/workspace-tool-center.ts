@@ -10,7 +10,7 @@
  * without ever asking the AI agent to traffic its own workspaceId.
  *
  * The MCP server's `/mcp/:wsId` route invokes every factory with the URL's
- * wsId at request time. From the agent's POV, `inbox_push({ docs, comments })`
+ * wsId at request time. From the agent's POV, `inbox_push({ body })`
  * has no identity parameter — workspaceId is invisible, baked into the
  * tool by the server. Forgery surface is zero because the URL is the
  * only identity carrier and `.mcp.json` is per-workspace.
@@ -25,6 +25,7 @@
  */
 
 import type { Tool } from 'ai'
+import type { SessionRuntimeSelection } from '../workspaces/session-runtime-binding.js'
 import type { IInboxStore, InboxEntry, InboxOrigin } from './inbox-store.js'
 import type { IEntityStore } from './entity-store.js'
 import type { IProvenanceStore } from './provenance-store.js'
@@ -35,9 +36,10 @@ import type { ArtifactRef, SessionOrigin } from './provenance-store.js'
 import type { IssuesSnapshot, IssueDetail, WikilinkIssueRef } from '../workspaces/issues/board.js'
 import type { WorkspaceSessionDirectory } from '../workspaces/session-directory.js'
 import type { HeadlessStructuredOutput } from '../workspaces/headless-output.js'
-import type { HeadlessInquirySubject, HeadlessTaskStatus } from '../workspaces/headless-task-registry.js'
+import type { HeadlessTaskRecord, HeadlessInquirySubject, HeadlessTaskStatus } from '../workspaces/headless-task-registry.js'
 import type {
   ApplyTemplateUpgradeInput,
+  SkillProjectionRequest,
   TemplateUpgradePlan,
   TemplateUpgradeResult,
 } from '../workspaces/template-upgrade.js'
@@ -119,6 +121,12 @@ export interface WorkspaceConversationTask {
   readonly finishedAt?: number
   readonly durationMs?: number
   readonly error?: string
+  readonly exitCode?: number | null
+  readonly signal?: string | null
+  readonly killed?: boolean
+  readonly processStarted?: boolean
+  readonly stderrTail?: string
+  readonly stderrTruncated?: boolean
   readonly structured: HeadlessStructuredOutput | null
 }
 
@@ -138,12 +146,16 @@ export type WorkspaceConversationAskResult =
     }
 
 export interface WorkspaceConversationControl {
+  /** Follow the live Issue ownership policy, including first-owner recruitment. */
+  replyToIssue?(input: { workspaceId: string; issueId: string; prompt: string; commentId: string }): Promise<{ taskId: string; resumeId: string }>
+
   ask(input: {
     readonly prompt: string
     /** Optional execution watchdog. Omit to let the Session run to completion. */
     readonly timeoutMs?: number
     readonly target: WorkspaceConversationTarget
     readonly agent?: string
+    readonly selection?: SessionRuntimeSelection
     /** Add the artifact-reconstruction preamble when a fresh fallback worker is
      * required. Provenance may still resolve as reconstructed when this is
      * false; prompt semantics and attribution are deliberately independent. */
@@ -158,7 +170,7 @@ export interface WorkspaceConversationControl {
 
 /** Launcher-owned reconciliation for the caller's current Workspace. */
 export interface WorkspaceTemplateUpgradeControl {
-  plan(workspaceId: string): Promise<TemplateUpgradePlan>
+  plan(workspaceId: string, projection?: SkillProjectionRequest): Promise<TemplateUpgradePlan>
   apply(workspaceId: string, input: ApplyTemplateUpgradeInput): Promise<TemplateUpgradeResult>
 }
 
@@ -230,9 +242,10 @@ export interface WorkspaceToolContext {
    *  agent). Factories pass it through to call sites (e.g. inbox_push →
    *  inboxStore.append) so a pushed entry self-links to its originating run /
    *  issue. Absent (interactive session, or no header) → undefined. */
+  callerRun?: Pick<HeadlessTaskRecord, 'taskId' | 'status' | 'trigger' | 'inquiry'>
   origin?: InboxOrigin
   /** GLOBAL issue-board reader — the cross-workspace board the
-   *  `alice-workspace` CLI surfaces (issue_list / issue_show read EVERY
+   *  `alice` CLI surfaces (issue_list / issue_show read EVERY
    *  workspace's issues, not just the caller's). Backed by the live
    *  WorkspaceService at the two build sites (cli.ts, mcp.ts). OPTIONAL: a
    *  context without a service (older callers, unit tests) omits it, and the
@@ -243,8 +256,10 @@ export interface WorkspaceToolContext {
     detail(wsId: string, id: string): Promise<IssueDetail | null>
     resolveByName(name: string): Promise<WikilinkIssueRef[]>
   }
+  issueRuns?: { start(wsId: string, id: string, retryRunId?: string): Promise<{ taskId: string }> }
   /** Safe current-Workspace template preview/apply surface. */
   templateUpgrades?: WorkspaceTemplateUpgradeControl
+  aliceHarnessUpgrades?: WorkspaceTemplateUpgradeControl
   /** Rename a product Session in this Workspace. Empty/null clears the nametag. */
   setSessionDisplayName?: (input: {
     readonly resumeId: string

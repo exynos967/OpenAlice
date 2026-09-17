@@ -68,7 +68,7 @@ function MoversBoardView() {
             {data && <BoardMeta meta={data.meta} />}
           </span>
         }
-        live={{ lastUpdated: updatedAt }}
+        live={{ lastUpdated: updatedAt, label: 'Fetched', hideDot: true }}
       />
       <div className="flex-1 overflow-y-auto px-4 md:px-8 py-4 flex flex-col gap-4 min-h-0">
         <div
@@ -202,7 +202,7 @@ function CalendarBoardView() {
             {data && <BoardMeta meta={data.meta} extra={`${data.window.start} → ${data.window.end}`} />}
           </span>
         }
-        live={{ lastUpdated: updatedAt }}
+        live={{ lastUpdated: updatedAt, label: 'Fetched', hideDot: true }}
       />
       <div className="flex-1 overflow-y-auto px-4 md:px-8 py-4 flex flex-col gap-4 min-h-0">
         <div
@@ -576,7 +576,7 @@ function MacroBoardView() {
             {data && <BoardMeta meta={data.meta} />}
           </span>
         }
-        live={{ lastUpdated: updatedAt }}
+        live={{ lastUpdated: updatedAt, label: 'Fetched', hideDot: true }}
       />
       <div className="flex-1 overflow-y-auto px-4 md:px-8 py-4 min-h-0">
         {loading && !data && <CenteredLoading label={t('common.loading')} />}
@@ -633,7 +633,7 @@ function TermStructureBoardView() {
             {data && <BoardMeta meta={data.meta} />}
           </span>
         }
-        live={{ lastUpdated: updatedAt }}
+        live={{ lastUpdated: updatedAt, label: 'Fetched', hideDot: true }}
       />
       <div className="flex-1 overflow-y-auto px-4 md:px-8 py-4 flex flex-col gap-6 min-h-0">
         {loading && !data && <CenteredLoading label={t('common.loading')} />}
@@ -753,7 +753,7 @@ function GlobalMacroBoardView() {
             {data && <BoardMeta meta={data.meta} />}
           </span>
         }
-        live={{ lastUpdated: updatedAt }}
+        live={{ lastUpdated: updatedAt, label: 'Fetched', hideDot: true }}
       />
       <div className="flex-1 overflow-y-auto px-4 md:px-8 py-4 min-h-0">
         {loading && !data && <CenteredLoading label={t('common.loading')} />}
@@ -906,7 +906,7 @@ function ShippingBoardView() {
             {data && <BoardMeta meta={data.meta} />}
           </span>
         }
-        live={{ lastUpdated: updatedAt }}
+        live={{ lastUpdated: updatedAt, label: 'Fetched', hideDot: true }}
       />
       <div className="flex-1 overflow-y-auto px-4 md:px-8 py-4 min-h-0">
         {loading && !data && <CenteredLoading label={t('common.loading')} />}
@@ -987,7 +987,7 @@ function FedBoardView() {
             {data && <BoardMeta meta={data.meta} />}
           </span>
         }
-        live={{ lastUpdated: updatedAt }}
+        live={{ lastUpdated: updatedAt, label: 'Fetched', hideDot: true }}
       />
       <div className="flex-1 overflow-y-auto px-4 md:px-8 py-4 flex flex-col gap-5 min-h-0">
         {loading && !data && <CenteredLoading label={t('common.loading')} />}

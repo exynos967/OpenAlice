@@ -1,3 +1,6 @@
+import { acceptNativeUpgrade } from './native-upgrade-acceptance.mjs'
+import { writeDevBrokerBinding } from './dev-broker-binding.mjs'
+import { runtimeCompileOptions } from './bun-compile-options.js'
 import { createHash } from 'node:crypto'
 import {
   chmod,
@@ -69,8 +72,7 @@ const build = await Bun.build({
   entrypoints: [join(repositoryRoot, 'packages/cli/bin/openalice-bun.ts')],
   compile: {
     outfile: executablePath,
-    autoloadBunfig: false,
-    autoloadDotenv: false,
+    ...runtimeCompileOptions,
   },
   define: {
     'globalThis.__OPENALICE_BUILD_VERSION__': JSON.stringify(product.version),
@@ -95,6 +97,8 @@ await Promise.all([
 await mkdir(join(releaseRoot, 'licenses'), { recursive: true })
 await cp(join(repositoryRoot, 'node_modules/dugite/LICENSE'), join(releaseRoot, 'licenses/dugite-LICENSE'))
 await materializeWorkspaceCli()
+
+await writeDevBrokerBinding(resourceRoot, { commit: process.env['OPENALICE_DEV_COMMIT'], inputDir: join(repositoryRoot, 'dist/dev-broker-packs'), version: product.version, platform: platformName, arch: process.arch })
 
 const files = await releaseFiles(releaseRoot, new Set(['release.json']))
 const unsignedReleaseMetadata = {
@@ -279,13 +283,13 @@ async function smokeRelease(options: {
     port: 0,
     fetch(request) {
       const url = new URL(request.url)
-      if (url.pathname === '/cli/ws-release/workspace/manifest') {
+      if (url.pathname === '/cli/ws-release/data/manifest') {
         return Response.json({
           groups: { issue: { list: { tool: 'workspace_issue_list', schema: { type: 'object', properties: {} } } } },
           groupDescriptions: { issue: 'Issue coordination' },
         })
       }
-      if (url.pathname === '/cli/ws-release/workspace/invoke' && request.method === 'POST') {
+      if (url.pathname === '/cli/ws-release/data/invoke' && request.method === 'POST') {
         return Response.json({ content: [{ type: 'text', text: 'BUN_WORKSPACE_CLI_OK' }] })
       }
       return Response.json({ error: 'not found' }, { status: 404 })
@@ -593,6 +597,7 @@ printf '%s\\n' "${'$'}1" > "${'$'}OPENALICE_SMOKE_OPEN_RECEIPT"
   if (runtimeError || exitCode !== 0) {
     throw new Error(`installed release Runtime failed: ${String(runtimeError)}\n${stdout}\n${stderr}`)
   }
+  const upgrade = await acceptNativeUpgrade({executablePath: options.executablePath, scratch: options.smokeHome, env: runtimeEnv, home: runtimeHome})
   const workspaceSessionLog = await readFile(
     join(runtimeHome, 'logs', 'workspace-sessions.log'),
     'utf8',
@@ -601,6 +606,7 @@ printf '%s\\n' "${'$'}1" > "${'$'}OPENALICE_SMOKE_OPEN_RECEIPT"
     throw new Error('installed release did not persist Workspace session logs under the selected Project Home')
   }
   return {
+    upgrade,
     nodeOrBunOnPath: false,
     gitInitCommitClone: true,
     networkGit: process.env['OPENALICE_BUN_NETWORK_GIT'] === '1',

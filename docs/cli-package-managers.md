@@ -7,8 +7,20 @@ owned by [[docs/cli-supervisor.md]] and [[docs/local-runtime.md]].
 
 The native target set is macOS, glibc Linux, and Windows on arm64 and x64.
 Windows direct installation lives in [[docs/cli-installer.md]]. Generated Windows
-packages are not public npm packages: first publication and Trusted Publisher
-enrollment remain required external activation steps.
+packages have completed first publication and Trusted Publisher enrollment.
+The seven-package stable npm channel is active at `0.91.1`: the meta package
+declares all six platform dependencies, including Windows x64 and ARM64.
+
+On 2026-09-05 [OIDC publication](https://github.com/TraderAlice/OpenAlice/actions/runs/33958504645)
+completed for `0.91.1`. All seven registry SHA-1/SHA-512 values match the
+release-owned manifest. Fresh public npm/Bun installs on macOS ARM64 and npm
+12.0.2 on clean Linux ARM64 passed startup, stable version discovery, stop,
+and removal while preserving project data. Native Windows package mechanics
+passed release acceptance; a separate Windows public-registry install was not
+repeated on a maintainer-owned Windows machine.
+The [Homebrew sync](https://github.com/TraderAlice/homebrew-tap/actions/runs/33957271180)
+also activated `0.91.1`; a fresh public tap install, startup, and removal passed
+inside a clean native Linux ARM64 Homebrew container.
 
 Public npm activation: `openalice` and its four platform packages were first
 published as `0.90.2` on 2026-09-04 under maintainer `jiaran258`. The registry
@@ -221,7 +233,7 @@ That skip alone is not proof of OIDC authorization.
 
 ### npm Trusted Publishing (OIDC)
 
-Activated on 2026-09-04: all five package connections were saved and
+Initially activated on 2026-09-04: all five package connections were saved and
 [real OIDC exchanges passed](https://github.com/TraderAlice/OpenAlice/actions/runs/33871780397)
 from integrated `dev` tooling in a single 15-second job. The temporary
 `openalice-first-publish` token was then revoked and the repository's
@@ -243,8 +255,15 @@ For each of `openalice`, `openalice-darwin-arm64`, `openalice-darwin-x64`,
   GitHub environment. Access to changing/running the trusted workflow is a
   publishing security boundary.
 
+On 2026-09-05 both Windows packages completed first publication and enrollment.
+The [seven-package exchange](https://github.com/TraderAlice/OpenAlice/actions/runs/33957933624)
+passed from `master`, including the new Windows x64 connection. The later
+publication and public-install receipts above prove activation separately.
+
 Publication runs on GitHub-hosted Ubuntu with `id-token: write`, Node 22.22.2,
-and pinned npm 12.0.2. npm handles its own short-lived credential exchange when
+and pinned npm 12.0.2 installed in an isolated runner-temporary prefix. Verify
+its version and add its bin directory to `GITHUB_PATH`; do not globally replace
+the npm tree that is executing its own upgrade. npm handles its short-lived credential exchange when
 publishing; neither `NPM_TOKEN` nor `NODE_AUTH_TOKEN` is configured. The generated
 packages must retain the matching `TraderAlice/OpenAlice` repository URL.
 Provenance is not itself proof of OIDC authentication.
@@ -264,11 +283,11 @@ secret. npm's restrictive 2FA/token policy is compatible with OIDC.
 
 See [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers/) and
 the [registry OIDC exchange API](https://api-docs.npmjs.com/). Adding future
-platform packages (including Windows) requires first publication and their own
-trusted-publisher connections. The historical receipts above cover only the
-original five names. `openalice-windows-arm64` and `openalice-windows-x64` must be
-enrolled before seven-package publication. Do not restore the revoked bootstrap
-token or count the old receipt as Windows publishing authority.
+platform packages requires first publication and their own trusted-publisher
+connections. The 2026-09-04 receipts cover only the original five names; use
+the seven-package receipt above for Windows authority. Do not restore the
+revoked bootstrap token or count an older, smaller receipt as new-platform
+publishing authority.
 
 ## Update and uninstall ownership
 
@@ -351,6 +370,12 @@ smoke first derives the same isolated prior archive set from the accepted
 candidate, then lets a local Git-backed tap or real `pacman -U` perform both
 version transitions. Lifecycle assertions stay shared while file mutation
 remains owned by the manager under test.
+
+Homebrew/Linuxbrew/AUR fixture generation uses `--system-only`: all four POSIX
+archives are required, no npm payload is materialized, and Windows archives
+are not inputs. These jobs need not wait for Windows candidates. Full public
+channel generation remains six-platform and keeps its Windows dependency;
+system-only fixture output cannot replace the complete publication manifest.
 
 For a stable release, the release job derives every package-manager channel only
 after all native candidates pass, attaches the generated publication inputs to

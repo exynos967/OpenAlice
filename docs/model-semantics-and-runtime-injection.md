@@ -233,8 +233,11 @@ the Workspace sidebar, and interactive CLI/API starts use `interactive`;
 Issues, schedules, automation, and headless CLI/API starts use `headless`. An explicit
 Quick Chat, sidebar, Issue, CLI, or API runtime choice wins for that one
 Session. Otherwise OpenAlice uses the mode's fixed Agent, then its recent
-Agent, then the legacy `.alice/workspace.json` `defaultAgent`, then the
-installation-wide `workspaceDefaultAgent`. If none resolves to a registered
+Agent, then the installation-wide `workspaceDefaultAgent`. Headless dispatch
+first uses its mode defaults, then `issueDefaultAgent`, then the interactive
+fallback. `.alice/workspace.json` contains display metadata only; migration
+0042 moves its shipped `defaultAgent` to the interactive fixed default without
+overwriting an existing fixed default. If none resolves to a registered
 Agent runtime, Alice falls back to the first registered runtime. Headless mode
 defaults must resolve to a headless-capable Agent.
 
@@ -474,7 +477,7 @@ Native Agent configuration files may contain user- or runtime-owned settings.
 The compatibility exporter must update only OpenAlice-owned keys/nodes,
 preserve unknown data, and restore the prior value on reset where a shared
 scalar is overridden. It is reached through the advanced deprecated surface;
-normal Workspace creation, Quick Chat, Issues, probes, WebPi, and resume do not
+normal Workspace creation, Quick Chat, Issues, probes, Web Sessions, and resume do not
 call it.
 
 Pi uses one generic OpenAlice-managed project extension plus local provider and
@@ -559,3 +562,39 @@ is deliberately absent.
 When a provider changes a model in place, update the registry and its unit
 tests together. Existing Workspace files are not rewritten in the background;
 the new facts apply on the next explicit provider apply or Workspace creation.
+
+## Managed Session execution permissions
+
+Alice-managed interactive, headless, and Web Sessions launch with full host
+filesystem/network access and automatic tool approval. Apply the same policy
+to fresh Sessions and exact resumes; approval `never` alone does not disable
+a native sandbox. In particular, Codex workspace-write requires Linux
+namespaces that many remote containers cannot create.
+
+| Runtime | Process-local execution policy |
+| --- | --- |
+| Codex | `danger-full-access`, approval `never`; Web thread start/resume use the same wire values |
+| Claude | `--dangerously-skip-permissions`, injected `sandbox.enabled=false` |
+| Cursor | `--force --trust --sandbox disabled` |
+| Grok | `--always-approve`, `--sandbox off` |
+| Antigravity | `--dangerously-skip-permissions`; no sandbox opt-in |
+| Oh My Pi | `--auto-approve` on all surfaces |
+| opencode | Process-local `OPENCODE_CONFIG_CONTENT` with `permission: "allow"` |
+| Pi | Native tools have no per-tool sandbox/approval; existing Workspace resource trust bootstrap applies |
+
+Do not implement this by rewriting global user configuration. Native runtime
+enterprise policies and OS permissions remain authoritative. UTA still owns
+trading permissions; these launch settings do not change its trading mode.
+
+
+### CLI conversation selection
+
+`conversation create` accepts credential/model/effort overrides for a new
+Session; `conversation ask` accepts the same optional dimensions for an idle
+existing Session. Credential is a vault slug or explicit native access, never
+secret material. Follow-up edits patch the stored binding under the headless
+execution claim and do not consult Workspace defaults. Changing credential
+clears inherited model/effort; omitted fields otherwise retain the Session's
+selection. Runtime identity remains fixed. Web paused-Session editing and CLI
+selection both resolve through `createSessionRuntimeBinding` and persist via
+`replaceRuntimeBinding`.

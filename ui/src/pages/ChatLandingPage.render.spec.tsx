@@ -7,7 +7,7 @@ import type { WorkspacesContextValue } from '../contexts/workspaces-context'
 import { i18n } from '../i18n'
 import type { AgentInfo, Workspace } from '../components/workspace/api'
 import { resetAgentRuntimesStore } from '../hooks/useAgentRuntimes'
-import { AutoPredictionLandingPage, AutoQuantLandingPage, ChatLandingPage } from './ChatLandingPage'
+import { AutoPredictionLandingPage, AutoQuantLandingPage, ChatLandingPage, HarnessLandingPage } from './ChatLandingPage'
 
 const mocks = vi.hoisted(() => ({
   useWorkspaces: vi.fn(),
@@ -171,7 +171,7 @@ function context(
     quickChat: mocks.quickChat,
     pauseSession: vi.fn(async () => undefined),
     resumeSession: vi.fn(async () => undefined),
-    openWebPiSession: vi.fn(async () => undefined),
+    openWebSession: vi.fn(async () => undefined),
     requestDeleteSession: vi.fn(),
     setSessionPresence: vi.fn(async () => undefined),
     setSessionDisplayName: vi.fn(async () => undefined),
@@ -508,6 +508,22 @@ describe('ChatLandingPage workflow starters', () => {
 })
 
 describe('ChatLandingPage keyboard submission', () => {
+  it('offers GUI for a capable runtime and passes the selected surface', async () => {
+    mocks.useWorkspaces.mockImplementation(() => ({
+      ...context([chatWorkspace()]),
+      agents: [{ ...piAgent, capabilities: { ...piAgent.capabilities, web: { wire: 'pi-rpc', freshSession: true } } }],
+    }))
+    render(<ChatLandingPage spec={{ params: { targetWsId: 'chat-1' } }} />)
+    await screen.findByRole('button', { name: 'Model and reasoning' })
+    fireEvent.click(screen.getByRole('button', { name: 'UI mode: TUI' }))
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: 'GUI' }))
+    const composer = screen.getByPlaceholderText('Describe the task, question, or decision…')
+    fireEvent.change(composer, { target: { value: 'GUI hello' } })
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })
+    await waitFor(() => expect(mocks.quickChat).toHaveBeenCalled())
+    expect(mocks.quickChat.mock.calls[0]?.[8]).toBe('webpi')
+  })
+
   it('does not submit when Enter confirms an IME composition candidate', async () => {
     render(<ChatLandingPage spec={{ params: { targetWsId: 'chat-1' } }} />)
 
@@ -528,6 +544,7 @@ describe('ChatLandingPage keyboard submission', () => {
       undefined,
       undefined,
       'native',
+      'terminal',
     ))
   })
 
@@ -607,6 +624,7 @@ describe('ChatLandingPage keyboard submission', () => {
       undefined,
       undefined,
       'native',
+      'terminal',
     ))
     expect(mocks.probeAgentRuntimeReadiness).not.toHaveBeenCalled()
     expect(screen.queryByText('The runtime reported an error: 429: balance exhausted')).toBeNull()
@@ -675,6 +693,7 @@ describe('ChatLandingPage keyboard submission', () => {
       undefined,
       undefined,
       undefined,
+      'terminal',
     ))
   })
 
@@ -703,6 +722,7 @@ describe('ChatLandingPage keyboard submission', () => {
       'gemini-3.1-pro-preview',
       'high',
       'native',
+      'terminal',
     ))
   })
 })
@@ -757,6 +777,7 @@ describe('ChatLandingPage AI source disclosure', () => {
       undefined,
       undefined,
       'native',
+      'terminal',
     ))
   })
 
@@ -817,6 +838,7 @@ describe('ChatLandingPage AI source disclosure', () => {
       'deepseek-v4-flash',
       'high',
       undefined,
+      'terminal',
     ))
   })
 
@@ -891,6 +913,7 @@ describe('ChatLandingPage AI source disclosure', () => {
       'gpt-5.6-sol',
       undefined,
       'native',
+      'terminal',
     ))
   })
 
@@ -985,5 +1008,24 @@ describe('ChatLandingPage AI source disclosure', () => {
     expect(mocks.detectWorkspaceCredential).not.toHaveBeenCalled()
     expect(await findInferenceTrigger('deepseek-v3.2')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Model and reasoning' }).textContent).not.toContain('gemini-3.1-pro-preview')
+  })
+})
+
+
+describe('Workspace embedded composer', () => {
+  it('submits into the explicit Quant Workspace even when another is the default', async () => {
+    const target: Workspace = { ...chatWorkspace(), id: 'quant-target', template: 'auto-quant-v2' }
+    const other: Workspace = { ...target, id: 'quant-default' }
+    workspaces = [target, other]
+    mocks.useWorkspaces.mockImplementation(() => context(workspaces, other.id))
+    render(<HarnessLandingPage mode="auto-quant" spec={{ params: { targetWsId: target.id } }} showHeader={false} />)
+    await screen.findByRole('button', { name: 'Model and reasoning' })
+    const input = screen.getByPlaceholderText('Describe the strategy, market, hypothesis, or iteration goal…')
+    fireEvent.change(input, { target: { value: 'Inspect existing research' } })
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' })
+    await waitFor(() => expect(mocks.quickChat).toHaveBeenCalledWith(
+      'Inspect existing research', 'pi', undefined, target.id, 'auto-quant-v2', undefined, undefined, undefined,
+      'terminal',
+    ))
   })
 })

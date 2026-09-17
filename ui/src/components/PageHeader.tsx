@@ -10,7 +10,7 @@ interface PageHeaderProps {
    *  ("updated 14s ago") in the description row below the toolbar.
    *  Pass the timestamp of the last successful refresh. `null` keeps the live
    *  state visible before the first refresh completes. */
-  live?: { lastUpdated: Date | null }
+  live?: { lastUpdated: Date | null; label?: string; hideDot?: boolean }
 }
 
 export function PageHeader({
@@ -25,7 +25,7 @@ export function PageHeader({
       {(description || live) && (
         <div data-slot="page-description" className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-4 pb-1 pt-3 text-xs leading-4 text-muted-foreground md:px-6">
           {description && <span className="min-w-0">{description}</span>}
-          {live && <LiveIndicator lastUpdated={live.lastUpdated} />}
+          {live && <LiveIndicator lastUpdated={live.lastUpdated} label={live.label} hideDot={live.hideDot} />}
         </div>
       )}
     </>

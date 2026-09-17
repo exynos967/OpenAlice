@@ -326,6 +326,8 @@ function spawnConnector() {
       ...process.env,
       ...ALICE_PROJECT_ENV,
       OPENALICE_CONNECTOR_PORT: String(CONNECTOR_PORT),
+      OPENALICE_MCP_PORT: String(MCP_PORT),
+      OPENALICE_TOOL_SOCKET: '',
       OPENALICE_HOME: DATA_HOME,
       AQ_LAUNCHER_ROOT: LAUNCHER_ROOT,
       OPENALICE_LAUNCHER: LAUNCHER,
@@ -697,6 +699,6 @@ export async function startGuardianRuntime() {
 if (!globalThis.__OPENALICE_INTERNAL_ROLE_DISPATCH__) {
   startGuardianRuntime().catch((err) => {
     console.error('[guardian/prod] fatal:', err)
-    shutdown(1)
+    shutdown(Number.isInteger(err?.exitCode) ? err.exitCode : 1)
   })
 }

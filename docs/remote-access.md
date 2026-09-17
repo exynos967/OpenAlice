@@ -49,6 +49,14 @@ loop on a host with no Node, Bun, or Agent Runtime installed. Real long-latency
 Agent TUI measurements remain a separate release observation rather than a
 reason to invent a new terminal protocol preemptively.
 
+Native `server run/start` derives its content identity from the installed
+`release.json`, matching the interactive launcher. Readiness confirms pending
+activation only when the running identity matches the installed pointer.
+Ownership contention exits with code 75 and does not roll back the installed
+release; corrupted or non-starting releases retain the existing rollback path.
+On Linux, process identity prefers procfs start ticks plus boot time, with the
+existing conservative fallback when process metadata cannot be read.
+
 ## Product Decision
 
 OpenAlice has four first-class entry surfaces, not one replacement chain:
@@ -602,8 +610,9 @@ That is a later protocol, not a shortcut in the SSH phase.
 The existing Workspace PTY WebSocket crosses the SSH tunnel unchanged. The
 remote PTY and Agent TUI remain authoritative; the local xterm-compatible
 surface renders received terminal bytes. Shell, Claude Code, Codex, opencode,
-and Pi retain the same terminal semantics. WebPi remains an optional structured
-Pi surface, not a prerequisite or replacement for shell/TUI workflows.
+and Pi retain the same terminal semantics. The Web conversation surface remains
+an optional structured presentation of a runtime's own protocol, not a
+prerequisite or replacement for shell/TUI workflows.
 
 The browser's core health probe publishes a monotonic recovery generation only
 when Alice transitions from unavailable back to available. PTY views use that
@@ -942,7 +951,7 @@ behavior.
 - persistent terminal screen history by default;
 - simultaneous writable control from multiple clients;
 - replacing Electron with a browser wrapper;
-- replacing Shell or native Agent TUIs with Pi/WebPi;
+- replacing Shell or native Agent TUIs with the Web conversation surface;
 - scanning arbitrary remote directories or silently cloning OpenAlice; managed
   clone/update is restricted to the displayed destination and explicit plan;
 - installing, pinning, downgrading, or repairing Agent Runtime executables on a

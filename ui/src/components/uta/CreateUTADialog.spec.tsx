@@ -167,7 +167,7 @@ describe('CreateUTADialog', () => {
     await waitFor(() => expect(getBrokerPacks).toHaveBeenCalled())
     fireEvent.click(screen.getByText('OKX'))
     fireEvent.change(screen.getByPlaceholderText('Required'), { target: { value: 'test-key' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Test Connection →' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }))
 
     await waitFor(() => expect(screen.getByText('Connected with partial access')).toBeTruthy())
     expect(screen.getByText(/position access was rejected/i)).toBeTruthy()

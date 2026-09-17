@@ -5,6 +5,8 @@ configuration, delivery guarantees, adapter extension, health, and packaging.
 It complements [[docs/workspace-issues-and-scheduling.md]] and
 [[docs/managed-workspace-runtime.md]].
 
+Inbox body and shared reference semantics live in [[docs/inbox-content.md]].
+
 ## Product Contract
 
 Connector Service projects durable OpenAlice Inbox entries into optional
@@ -46,27 +48,34 @@ categories.
   through the existing attachment safety path, and posts a directed
   artifact delivery back to that Connector only. Cancel does not enqueue.
   First-version pull does not change Inbox read state. Discord and Slack
-  keep `/inbox` as a placeholder and reject artifact delivery as
-  unimplemented. `/uta` is the same shape: Telegram renders the review
+  keep `/inbox` as a placeholder; all four adapters support directed artifact
+  delivery, independently of whether they expose file-pull controls. `/uta` is the same shape: Telegram renders the review
   panel; Discord and Slack reply with a placeholder. Connector never
   talks to UTA. Push and reject stay Alice-owned wallet writes, gated
   by the current trading mode. Callback data carries only page-local
   indexes; account ids and pending hashes stay in the Connector session
   and the Alice-validated action request.
-- Connector Service never interprets chat. Alice owns one phone-desk Issue
-  per `desk`-capable connector. Connector durably queues owner text keyed by
-  `connectorId`; Alice claims that stack only while that connector's live
-  desk exists and no generation is running on it. Several stacked DMs become
-  one quoted comment on that Issue. Alice suppresses a desk comment only when
-  its run carries the `connector-cron-issue` trigger metadata and its text
-  contains the literal tag `[[no-reply]]`. Ordinary chat replies treat that
-  tag as text. Inbound owner comments are not echoed back to that connector.
+- Connector Service owns outgoing reply syntax. Resolved file references are
+  delivered at their original position: text before, media, then text after. Alice owns one phone-desk Issue
+  per `desk`-capable connector and forwards raw reply text with a Workspace id
+  and server-derived `conversation | automation` source. Workspace/Issue
+  projection does not parse delivery markers. Inbound owner comments are not
+  echoed back. Automated `[[no-reply]]` outside code suppresses delivery;
+  ordinary conversations can discuss the marker literally. A silent final
+  still terminates transport activity.
+  Connector durably queues owner text by connector id. Alice claims it while
+  a live desk exists and no generation is running; stacked DMs become one
+  quoted Issue comment. This ingress contract is separate from reply parsing.
   While a desk turn is running, Alice also
   projects an explicit `accepted | progress | final | failed` lifecycle.
   Telegram turns `accepted` into a native Bot API live draft immediately,
   refreshes that draft every 20 seconds, and replaces it with sealed mid-turn
   `text` blocks (a tool or error followed them). If live drafts are unavailable,
-  Telegram refreshes the ordinary typing action every four seconds. Final and
+  Telegram refreshes the ordinary typing action every four seconds. Typing also
+  continues alongside text drafts during tool calls, until the terminal event.
+  In-turn CLI comments update the same draft rather than marking it final. A
+  suppressed automated reply sends a textless final event to stop activity
+  without publishing a message. Final and
   failed replies are always persistent messages; ephemeral progress never
   suppresses an identical final answer. Tool names, status, and payloads stay
   off the owner chat. The trailing text still becomes today's reply comment.
@@ -119,7 +128,7 @@ categories.
 
 ```text
 Workspace agent
-  -> alice-workspace inbox push (CLI)
+  -> alice inbox push (CLI)
   -> InboxStore durable JSONL append
   -> non-blocking Alice bridge
   -> Connector Service on loopback
@@ -175,10 +184,72 @@ Load-bearing paths:
   materialization, Alice-side health, and the resident artifact-request bridge.
 - `src/workspaces/issues/telegram-desk-chat.ts` — phone-desk inbound claim
   and scheduled-fire comment stamp.
-- `src/workspaces/issues/telegram-desk-project.ts` — `[[no-reply]]` filter
-  and owner-chat projection.
+- `src/workspaces/issues/telegram-desk-project.ts` — raw owner-chat projection
+  with trusted source and Workspace context.
+- `services/connector/src/core/reply-directives.ts` — reply syntax parser.
+- `src/workspaces/binary-file.ts` + `src/server/workspace-files.ts` — generic,
+  bounded file access on the existing local tool listener; no Connector types.
 - `src/webui/routes/connectors.ts` + `ui/src/pages/ConnectorsPage.tsx` — generic
   Settings surface.
+
+## Reply attachments
+
+The Project-owned `file-delivery` Skill teaches this reply path separately from
+Inbox notifications and reports. It follows Alice Harness injection preferences
+and upgrades; optional sticker-pack guidance remains owned by the sticker pack.
+
+A final reply may include `[[reports/chart.png]]`. Paths are relative to
+its source Workspace. Ordinary `[[name]]` references remain text; inline/fenced
+code and escaped brackets are literal, including examples of `[[no-reply]]`.
+The Connector extension parser preserves unknown syntax and unresolved paths.
+It removes only successfully resolved references from displayed text, reads files through Alice's generic `/cli/workspace-files/:id?path=...` interface,
+and asks the adapter to upload them. It never accepts a model-provided fetch
+host or reads Workspace directories itself. Dev/server pass the selected tool
+port; Electron passes its local tool socket. The existing local tool listener
+owns access, with no new public unauthenticated route.
+
+Files retain their bytes and filename. Binary formats such as PDF, PNG and CSV
+are supported; this path does not use Inbox or its report encoding conversion.
+At most five unique files, each at most 1 MiB, are sent per final reply.
+Absolute paths, escaping symlink targets, directories and oversized reads are
+rejected by the generic file API. Unreadable, missing, unsupported or over-limit references stay literal, including
+when the adapter cannot send files. At most 20 unique candidates are resolved;
+only five readable files are consumed. Upload failures produce a visible diagnostic
+and journal failure; remaining files are still attempted.
+Telegram sends PNG/JPEG/WebP images as photos and `sticker/*.png` or
+`sticker/*.webp` as native static stickers; other formats are documents.
+Files must satisfy Telegram's media requirements; no implicit image conversion
+occurs. Inbox artifact pulls remain documents. The old unreleased `file:` syntax
+is replaced directly, not maintained as a second syntax.
+
+The same `sendOwnerFile(attachment, presentation)` adapter interface handles
+reply files on Telegram, Discord, Slack, and Feishu/Lark. Core never branches
+on platform IDs. Discord sends local stickers and images as uploaded image
+attachments, not native sticker IDs. Slack uses `filesUploadV2` in the owner's
+DM and lets Slack preview image uploads. Feishu uploads images with
+`im.image.create` (`image_type: message`) and sends an `image_key` message;
+local stickers use this same image path. Ordinary files use its file upload
+and `file_key` message path. Directed Inbox artifacts default to files on every
+adapter, without adding another Inbox summary.
+
+Slack requires `files:write` in addition to its existing owner-DM permissions.
+Feishu requires image/file resource upload permission (`im:resource`) and bot
+message sending permission. Existing installations may need updated app scopes.
+No adapter converts image bytes or creates server-wide emoji/sticker resources.
+Reply media support does not itself enable private chat ingress or advertise
+the `desk` capability.
+
+Official API references:
+- [Discord message files and sticker IDs](https://docs.discord.com/developers/resources/message)
+- [Slack SDK file uploads](https://docs.slack.dev/tools/node-slack-sdk/web-api/)
+- [Feishu image upload](https://open.feishu.cn/document/server-docs/im-v1/image/create)
+
+Progress never uploads files. Events for a conversation are serialized;
+concurrent/repeated message IDs share one delivery attempt, including uncertain
+network failures. This bounded deduplication is process-local (last 1,000 IDs),
+not an exactly-once guarantee across service restarts. Owner-chat delivery is
+still best-effort; local comments remain the durable record. Automated silence
+suppresses both text and files before reading any file.
 
 ## Configuration and Secrets
 
@@ -463,8 +534,9 @@ The surfaces deliberately have different jobs:
   Workspaces do not fire. Owner DMs become comments on that connector's
   Issue; the desk is seeded with `commentPrompt: '{comment}'` so those
   comments are the reply Input Prompt as-is. Scheduled-fire `assistantText`
-  is stamped as a comment. Connector projects those comments unless they
-  contain the literal tag `[[no-reply]]` or arrived from that connector.
+  is stamped as a comment. Connector interprets automated silence from the
+  forwarded source; comments
+  that arrived from that connector are not echoed.
   Pending comment replies also carry compact turn progress. The connector chat
   ships sealed mid-turn `text` blocks (the last consecutive text before a
   tool or error) and skips tool/error blocks. A text already sent this way
@@ -644,3 +716,47 @@ Changes to this subsystem require:
 Real Telegram/Discord delivery needs user-owned platform credentials and is a
 manual acceptance lane; credential-free CI must not pretend that a live
 third-party message was delivered.
+
+### Market reply snapshots
+
+Final owner-chat references beginning with `market/` resolve through the local
+Alice market gateway rather than Workspace file access. DeliveryManager sends
+the generated PNG as a photo at the reference position, using the same ordered
+parts and five-media limit as files. Automation silence skips resolution;
+failed charts retain the reference with an unavailable notice. Inbox's derived
+file index excludes market references.
+
+The renderer uses bundled JavaScript and a bundled OFL Liberation Sans font;
+it needs neither a browser nor a platform-native graphics library. Font paths
+are filled as compound contours to preserve digit/letter counters. PNGs are
+2400 by 1600 for legible mobile zoom; the attachment byte ceiling still applies.
+
+## Session model controls
+
+Telegram `/model` opens an owner-only private-chat inline panel for the existing
+phone-desk Session. Runtime is fixed. Credential, model, and effort use the same
+picker policy as Chat and Issues. Options are suggestions, not a claim that an
+account can access every model; `/model <model-id>` previews a custom model ID.
+Changing credential clears model/effort; changing model clears effort. Each
+choice previews, and **Save** commits. **Close** discards unsaved choices.
+
+Connector's optional `sessionModel` adapter context calls Alice's fixed local
+HTTP/Unix-socket gateway at `/cli/connector-model/:connectorId`. Alice resolves
+the desk and validates compatibility; only credential IDs/labels cross the
+boundary, never credential contents. There is no caller-selected Workspace or
+runtime. The command is consumed by Connector, not posted as an agent comment.
+
+Saving changes only the assigned Session binding. A running headless turn keeps
+its captured settings; subsequent comments/scheduled turns resolve the new
+binding. An active interactive TUI/GUI must first disconnect. Workspace defaults
+and other Sessions are unchanged. Missing or unassigned desks instruct the owner
+to send a first message. The menu does not silently create a replacement Session.
+
+Telegram panels expire after ten minutes and use bounded pagination and opaque
+callback coordinates. Owner checks apply to both commands and callbacks. A
+Session handoff or intervening binding edit invalidates a save, and concurrent
+saves are rejected. Transport or validation errors remain visible; they never
+produce a success acknowledgement. Connector restart invalidates old panels.
+The control contract is platform-neutral; Telegram currently implements its UI.
+See [Telegram inline keyboards](https://core.telegram.org/bots/api#inlinekeyboardbutton)
+and [callback acknowledgement](https://core.telegram.org/bots/api#answercallbackquery).

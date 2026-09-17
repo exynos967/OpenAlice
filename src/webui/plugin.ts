@@ -1,3 +1,4 @@
+import { prepareProjectWorkspaces } from '../workspaces/project-workspace-setup.js'
 import { Hono, type Context } from 'hono'
 import { cors } from 'hono/cors'
 import { createAdaptorServer, serve } from '@hono/node-server'
@@ -58,6 +59,7 @@ import { createHeadlessRoutes } from './routes/headless.js'
 import { attachWorkspacesWS, type AttachedWS } from './workspaces-ws.js'
 import { attachWorkspacesIpc, type AttachedWorkspaceIpc } from './workspaces-ipc.js'
 import { attachWebIpc, type AttachedWebIpc } from './web-ipc.js'
+import { registerCliRoutes } from '../server/cli.js'
 import { mountLocalToolGateway } from '../server/local-tool-gateway.js'
 import type { Server as HttpServer } from 'node:http'
 import { proxyHarnessSurface, attachHarnessSurfaceWS, type AttachedHarnessSurfaceWS } from './harness-surface-proxy.js'
@@ -229,6 +231,14 @@ export class WebPlugin implements Plugin {
       disabled: authDisabled,
     }))
 
+    registerCliRoutes(app, {
+      toolCenter: ctx.toolCenter,
+      workspaceToolCenter: ctx.workspaceToolCenter,
+      inboxStore: ctx.inboxStore,
+      entityStore: ctx.entityStore,
+      getWorkspaceService: () => this.workspaceServiceRef?.current ?? this.workspaceService,
+    }, true)
+
     // ==================== Mount route modules ====================
     // /api/channels remains the compatibility boundary for legacy web
     // channels; Workspace Chat uses the Workspace APIs instead.
@@ -260,7 +270,7 @@ export class WebPlugin implements Plugin {
     app.route('/api/market', createMarketRoutes(ctx))
     app.route('/api/bars', createBarsRoutes(ctx))
     app.route('/api/reference', createReferenceRoutes(ctx))
-    app.route('/api/inbox', createInboxRoutes({ inboxStore: ctx.inboxStore }))
+    app.route('/api/inbox', createInboxRoutes({ inboxStore: ctx.inboxStore, resolveWorkspace: id => this.workspaceService?.registry.get(id) }))
     app.route('/api/version', createVersionRoutes())
     app.route('/api/alice-project', createAliceProjectRoutes())
 
@@ -278,6 +288,12 @@ export class WebPlugin implements Plugin {
         : {}),
       inboxStore: ctx.inboxStore,
     })
+    await prepareProjectWorkspaces(this.workspaceService, {
+      onProgress: (workspace, error) => {
+        if (error) console.warn(`[workspace setup] ${workspace}: ${error}. Retry from Quick Start or restart the project.`)
+        else console.log(`[workspace setup] Preparing ${workspace}…`)
+      },
+    }).catch((error: unknown) => console.warn('[workspace setup] Could not read setup request:', error))
     this.workspacesIpc = attachWorkspacesIpc(this.workspaceService)
     if (this.workspaceServiceRef) this.workspaceServiceRef.current = this.workspaceService
     app.route('/api/workspaces', createWorkspaceRoutes(this.workspaceService))

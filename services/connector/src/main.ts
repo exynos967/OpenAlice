@@ -1,3 +1,5 @@
+import { fetchMarketChart } from './core/market-chart.js'
+import { fetchWorkspaceAttachment, fetchAliceJson } from './core/workspace-files.js'
 /**
  * OpenAlice Connector Service.
  *
@@ -52,6 +54,9 @@ export async function startConnectorService(): Promise<void> {
     config,
     startedAt,
     recorder: journal,
+    readWorkspaceFile: fetchWorkspaceAttachment,
+    sessionModel: async (id, request) => JSON.parse(await fetchAliceJson(`/cli/connector-model/${encodeURIComponent(id)}`, request)),
+    renderMarket: fetchMarketChart,
     updateAdapterSettings: (id, patch) => configStore.patchAdapter(id, patch),
   })
   // Install before opening the loopback port so health can say `starting`

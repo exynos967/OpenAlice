@@ -5,7 +5,7 @@
  * to whatever workspace+session this tab's spec points at:
  *
  *   { wsId }                — workspace selected, no session pinned: shows
- *                             a CTA prompting the user to spawn one.
+ *                             the new-conversation composer for that workspace.
  *   { wsId, sessionId }     — session pinned: shows the terminal slot for
  *                             that session, with the workspace's files
  *                             panel alongside.
@@ -16,19 +16,23 @@
  * keeps running on the server. Use the sidebar's × to actually delete.
  */
 
+import { useHarnessWorkbenchContext } from '../components/harness/context'
 import { useEffect } from 'react'
-import { Monitor, Settings } from 'lucide-react'
+import { ChevronDown, Unplug, Monitor, Settings } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import '@xterm/xterm/css/xterm.css'
 
 import { useWorkspaces } from '../contexts/workspaces-context'
 import { useWorkspaceSessionData } from '../hooks/useWorkspaceData'
 import { useWorkspace } from '../tabs/store'
+import { agentSupportsWeb } from '../components/workspace/api'
 import { workspaceDisplayName, workspaceDisplayTitle } from '../components/workspace/display'
+import { HarnessLandingPage } from './ChatLandingPage'
 import { WorkspaceView } from '../components/workspace/WorkspaceView'
 import { PageTopBar } from '../components/PageTopBar'
 import { WorkspaceFilesToggle } from '../components/workspace/WorkspaceFilesToggle'
 import { Button } from '../components/ui/button'
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '../components/ui/dropdown-menu'
 import { AgentRuntimeIcon } from '../lib/agentRuntimeIcon'
 import type { ViewSpec } from '../tabs/types'
 
@@ -40,15 +44,17 @@ interface Props {
 export function WorkspacePage({ spec, visible }: Props) {
   const { t } = useTranslation()
   const ctx = useWorkspaces()
+  const workbench = useHarnessWorkbenchContext()
   const openOrFocus = useWorkspace((s) => s.openOrFocus)
   const wsId = spec.params.wsId
   const sessionId = spec.params.sessionId ?? null
   const source = spec.params.source
   const {
     workspace,
-    sessions,
     session: activeRecord,
     updateRuntime,
+    loading,
+    error: loadError,
   } = useWorkspaceSessionData(wsId, sessionId)
   const effectiveDefaultAgent = workspace?.defaultAgent ?? ctx.defaultAgent
   const defaultAgentEnabled =
@@ -94,10 +100,16 @@ export function WorkspacePage({ spec, visible }: Props) {
   if (!workspace) {
     return (
       <div className="workspaces-root flex flex-col items-center justify-center h-full text-muted-foreground text-sm">
-        {t('workspace.notFound')}
+        {loadError ?? (loading ? t('workspace.sessionOpening') : t('workspace.notFound'))}
       </div>
     )
   }
+
+  if (sessionId && !activeRecord) return (
+    <div role={loading ? 'status' : 'alert'} className="flex h-full items-center justify-center p-6 text-sm text-muted-foreground">
+      {loadError ?? (loading ? t('workspace.sessionOpening') : t('workspace.sessionNotFound'))}
+    </div>
+  )
 
   const workspaceName = workspaceDisplayName(workspace)
   const hasCustomName = workspaceName !== workspace.tag
@@ -105,33 +117,48 @@ export function WorkspacePage({ spec, visible }: Props) {
     activeRecord?.state === 'running' &&
     (activeRecord.surface ?? 'terminal') === 'terminal'
   const pausedCanvas = activeRecord?.state === 'paused'
-  const webPiCanvas = activeRecord?.state === 'running' && activeRecord.surface === 'webpi' && activeRecord.agent === 'pi'
+  const webCanvas = activeRecord?.state === 'running' && activeRecord.surface === 'webpi'
   const workspaceCanvas = terminalCanvas || pausedCanvas
+  // The surface toggle is offered only for runtimes that expose a structured
+  // protocol; a TUI-only runtime keeps its terminal without a dead button.
+  const canSwitchSurface = activeRecord?.state === 'running' && activeRecord.surface !== 'headless'
+    && (webCanvas || agentSupportsWeb(ctx.agents, activeRecord.agent))
+  const runtimeLabel = activeRecord
+    ? ctx.agents.find((agent) => agent.id === activeRecord.agent)?.displayName ?? activeRecord.agent
+    : ''
   const workspaceActions = (
     <>
-      {activeRecord?.agent === 'pi' && activeRecord.state === 'running' && (
+      {!workbench && activeRecord && canSwitchSurface && (
         <Button
           type="button"
           onClick={() => {
-            if ((activeRecord.surface ?? 'terminal') === 'webpi') {
+            if (webCanvas) {
               void ctx.resumeSession(wsId, activeRecord.id, source)
             } else {
-              void ctx.openWebPiSession(wsId, activeRecord.id, source)
+              void ctx.openWebSession(wsId, activeRecord.id, source)
             }
           }}
           variant="ghost"
           size="sm"
           className="text-[11px]"
-          title={(activeRecord.surface ?? 'terminal') === 'webpi' ? 'Open this Pi Session in the terminal' : 'Open this Pi Session in WebPi'}
+          title={webCanvas ? `Open this ${runtimeLabel} Session in the terminal` : `Open this ${runtimeLabel} Session in Web`}
         >
-          {(activeRecord.surface ?? 'terminal') === 'webpi'
+          {webCanvas
             ? <Monitor size={13} strokeWidth={2.25} aria-hidden="true" />
-            : <AgentRuntimeIcon agentId="pi" className="h-[13px] w-[13px]" />}
-          {(activeRecord.surface ?? 'terminal') === 'webpi' ? 'Open TUI' : 'WebPi Beta'}
+            : <AgentRuntimeIcon agentId={activeRecord.agent} className="h-[13px] w-[13px]" />}
+          {webCanvas ? 'Open TUI' : 'Web Beta'}
         </Button>
       )}
+      {activeRecord && (terminalCanvas || webCanvas) && <DropdownMenu>
+        <DropdownMenuTrigger render={<Button variant="ghost" size="icon" aria-label={t('workspace.interactiveOwnership.actions')}><ChevronDown size={14} /></Button>} />
+        <DropdownMenuContent align="end" className="min-w-64">
+          <DropdownMenuItem onClick={() => void ctx.pauseSession(wsId, activeRecord.id)}>
+            <Unplug size={14} />{t('workspace.interactiveOwnership.disconnect')}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>}
       <WorkspaceFilesToggle />
-      <Button
+      {!workbench && <Button
         type="button"
         onClick={() => ctx.openAgentConfig(wsId)}
         variant="ghost"
@@ -141,20 +168,24 @@ export function WorkspacePage({ spec, visible }: Props) {
       >
         <Settings size={13} aria-hidden />
         {t('workspace.settings')}
-      </Button>
+      </Button>}
     </>
   )
 
-  // Sessions list: pass the full workspace.sessions. WorkspaceView's
-  // `runningSlots` is gated on sessionId so the multi-terminal mount
-  // only happens when a session is pinned (one session per tab still
-  // holds for the active path); when sessionId is null, the empty
-  // state needs the full list to render resume/continue cards.
+  if (!sessionId) return (
+    <div className="workspaces-root workspace-page-shell flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <PageTopBar title={workspaceName} titleHint={workspaceDisplayTitle(workspace)} actions={workspaceActions}>
+        {hasCustomName && <span className="hidden font-mono text-[10px] text-muted-foreground/70 sm:inline">{workspace.tag}</span>}
+      </PageTopBar>
+      <HarnessLandingPage key={wsId} mode={source ?? 'chat'} spec={{ params: { targetWsId: wsId } }} showHeader={false} />
+    </div>
+  )
+
   return (
     <div className={`workspaces-root workspace-page-shell flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden${terminalCanvas ? ' is-terminal-canvas' : ''}${pausedCanvas ? ' is-paused-canvas' : ''}`}>
       {/* Running renderers fill the shared header slot with session identity
-       * and these actions. Libraries and paused sessions own their header here. */}
-      {!terminalCanvas && !webPiCanvas && (
+       * and these actions. Paused sessions own their header here. */}
+      {!terminalCanvas && !webCanvas && (
         <PageTopBar title={workspaceName} titleHint={workspaceDisplayTitle(workspace)} actions={workspaceActions}>
             {hasCustomName && (
               <span className="hidden shrink-0 font-mono text-[10px] text-muted-foreground/70 sm:inline">
@@ -166,33 +197,20 @@ export function WorkspacePage({ spec, visible }: Props) {
 
       <div className={`flex min-h-0 min-w-0 flex-1 flex-col${workspaceCanvas ? '' : ' p-3'}`}>
         <WorkspaceView
+          visible={visible}
           wsId={wsId}
           sessionId={sessionId}
           {...(source ? { source } : {})}
           activeRecord={activeRecord}
-          sessions={sessions}
           agents={ctx.agents}
           label={workspaceName}
-          terminalHeaderActions={terminalCanvas || webPiCanvas ? workspaceActions : undefined}
-          onSpawnFresh={spawnDefault}
+          terminalHeaderActions={terminalCanvas || webCanvas ? workspaceActions : undefined}
           onResume={(id) => ctx.resumeSession(wsId, id, source)}
           onUpdateSessionRuntime={(_id, update) => updateRuntime(update).then(() => undefined)}
           onSaveSessionDisplayName={(resumeId, displayName) => (
             ctx.setSessionDisplayName(wsId, resumeId, displayName)
           )}
-          onOpenWebPi={(id) => ctx.openWebPiSession(wsId, id, source)}
-          onSelectSession={(id) => {
-            // Running session — already alive on the server, just
-            // navigate. Mirrors the sidebar's onSelectSession path.
-            openOrFocus({
-              kind: 'workspace',
-              params: {
-                wsId,
-                sessionId: id,
-                ...(source ? { source } : {}),
-              },
-            })
-          }}
+          onOpenWeb={(id) => ctx.openWebSession(wsId, id, source)}
           onSessionLost={() => {
             // 4404 from the WS upgrade — the session is gone server-side.
             // Refresh the list; the reconcile effect will close this tab.
