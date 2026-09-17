@@ -38,6 +38,9 @@ services:
       # Keep CLI and health-check loopback traffic out of the outbound proxy.
       NO_PROXY: 127.0.0.1,localhost,::1
       no_proxy: 127.0.0.1,localhost,::1
+      # Allow agent CLIs to run with --dangerously-skip-permissions as root;
+      # the container itself is the sandbox (also baked into the image).
+      IS_SANDBOX: "1"
     # Keep stdin/tty open so `docker exec -it openalice claude` can run
     # the interactive OAuth flow.
     stdin_open: true
