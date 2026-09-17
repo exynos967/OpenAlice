@@ -101,9 +101,8 @@ jobs:
       arch: ${{ inputs.desktop-target == 'macOS-arm64' && 'arm64' || 'x64' }}
 
   release:
-    if: github.repository == 'TraderAlice/OpenAlice'
     name: Plan release candidate
-    if: inputs.operation == 'release' || inputs.operation == 'mirror'
+    if: github.repository == 'TraderAlice/OpenAlice' && (inputs.operation == 'release' || inputs.operation == 'mirror')
     runs-on: ubuntu-latest
     permissions:
       contents: write
