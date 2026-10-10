@@ -158,6 +158,10 @@ ENV OPENALICE_APP_HOME=/app \
     OPENALICE_CONNECTOR_PORT=47334 \
     OPENALICE_BIND_HOST=0.0.0.0
 
+# Guardian launcher identity: upstream's runtime retirement changed the
+# prod.mjs default to 'source'; the container must stay 'docker'.
+ENV OPENALICE_LAUNCHER=docker
+
 # The container IS the isolation boundary: workspaces launch agent CLIs with
 # --dangerously-skip-permissions, which Claude Code refuses as root unless
 # IS_SANDBOX is set (anthropics/claude-code#9184).

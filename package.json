@@ -1,6 +1,6 @@
 {
   "name": "open-alice",
-  "version": "0.93.1",
+  "version": "0.95.0-beta",
   "description": "File-based trading agent engine",
   "type": "module",
   "imports": {
@@ -13,8 +13,9 @@
   "scripts": {
     "cli": "node packages/cli/bin/openalice.ts",
     "dev": "tsx scripts/guardian/dev.ts",
+    "dev:no-relay": "tsx scripts/guardian/dev.ts --no-relay",
     "dev:onboarding": "tsx scripts/onboarding-test-dev.ts",
-    "remote:ssh": "node packages/cli/bin/openalice.mjs ssh",
+    "remote": "node packages/cli/bin/openalice.ts --remote",
     "docker:build": "docker build --tag openalice:local .",
     "docker:smoke": "node scripts/docker-runtime-smoke.mjs",
     "prebuild": "tsx scripts/build-migration-index.ts",
@@ -32,7 +33,7 @@
     "broker-packs:upgrade-smoke": "tsx scripts/broker-pack-upgrade-smoke.ts",
     "broker-packs:verify": "tsx scripts/verify-broker-packs.ts",
     "start": "node dist/main.js",
-    "electron:tsc": "pnpm -F @traderalice/desktop build",
+    "electron:tsc": "pnpm -F @traderalice/desktop build && node scripts/build-desktop-relay.mjs",
     "electron:build": "pnpm build && pnpm electron:tsc",
     "electron:smoke:demo": "node scripts/electron-demo/run.mjs --smoke",
     "electron:demo": "node scripts/electron-demo/run.mjs",
@@ -42,6 +43,8 @@
     "electron:verify-update-assets": "node scripts/verify-desktop-update-assets.mjs",
     "electron:smoke-toolchain": "node scripts/smoke-packaged-toolchain.mjs",
     "electron:smoke:packaged": "node scripts/desktop-packaged-smoke.mjs",
+    "electron:smoke:startup": "node scripts/desktop-startup-smoke.mjs",
+    "electron:smoke:credential-pi": "node scripts/desktop-packaged-smoke.mjs --credential-pi",
     "electron:smoke:onboarding": "node scripts/desktop-packaged-smoke.mjs --onboarding",
     "electron:smoke:trading-mode": "node scripts/desktop-packaged-smoke.mjs --trading-mode",
     "electron:smoke:workspace": "node scripts/desktop-packaged-smoke.mjs --workspace-acceptance",
@@ -52,6 +55,8 @@
     "vendor:runtime": "node scripts/vendor-managed-runtime.mjs",
     "test": "vitest run",
     "test:select": "node scripts/run-tests.mjs",
+    "test:suites": "node scripts/run-tests.mjs --suites",
+    "test:inventory": "node scripts/run-tests.mjs --inventory",
     "test:changed": "node scripts/run-tests.mjs --changed origin/dev",
     "test:owner:alice": "node scripts/run-tests.mjs --owner alice",
     "test:owner:ui": "node scripts/run-tests.mjs --owner ui",
@@ -60,9 +65,9 @@
     "test:owner:runtime-cli": "node scripts/run-tests.mjs --owner runtime-cli",
     "test:owner:desktop": "node scripts/run-tests.mjs --owner desktop",
     "test:owner:repo-tooling": "node scripts/run-tests.mjs --owner repo-tooling",
-    "test:integration": "node scripts/run-tests.mjs --lane integration",
-    "test:integration:workspace": "node scripts/run-tests.mjs --lane integration --area workspace",
-    "test:integration:uta": "node scripts/run-tests.mjs --lane integration --area uta",
+    "test:integration": "node scripts/run-tests.mjs --tier integration --lane hermetic --lane integration",
+    "test:integration:workspace": "node scripts/run-tests.mjs --tier integration --lane hermetic --lane integration --area workspace",
+    "test:integration:uta": "node scripts/run-tests.mjs --tier integration --lane hermetic --lane integration --area uta",
     "test:contract:workflow": "node scripts/run-tests.mjs --lane hermetic --area workflow",
     "test:contract:platform": "node scripts/run-tests.mjs --lane hermetic --area platform",
     "test:contract:connector-replay": "node scripts/run-tests.mjs --lane hermetic --area connector-replay",
@@ -84,7 +89,10 @@
     "test:live:bybit-diagnostic": "node scripts/run-tests.mjs --lane live-paper --area bybit-diagnostic",
     "test:watch": "vitest --config vitest.config.ts",
     "star-history:generate": "node scripts/generate-star-history.mjs",
-    "postinstall": "node scripts/fix-pty-perms.mjs"
+    "postinstall": "node scripts/fix-pty-perms.mjs",
+    "test:critical": "node scripts/run-tests.mjs --gate critical-local",
+    "test:unit": "node scripts/run-tests.mjs --tier unit",
+    "test:e2e": "node scripts/run-tests.mjs --tier e2e"
   },
   "keywords": [
     "trading",
@@ -112,6 +120,7 @@
     "@traderalice/guardian-runtime": "workspace:*",
     "@traderalice/ibkr": "workspace:*",
     "@traderalice/opentypebb": "workspace:*",
+    "@traderalice/update-lifecycle": "workspace:*",
     "@traderalice/uta-protocol": "workspace:*",
     "@xterm/addon-serialize": "0.15.0-beta.287",
     "@xterm/headless": "6.1.0-beta.287",
@@ -232,6 +241,13 @@
     "tsx": "^4.21.0",
     "turbo": "^2.9.14",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.5",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.18.2",
+    "react-i18next": "^17.0.8",
+    "msw": "^2.14.6",
+    "ccxt": "^4.5.78",
+    "yahoo-finance2": "^3.13.1"
   }
 }
