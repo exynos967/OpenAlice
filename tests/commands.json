@@ -317,6 +317,15 @@
         "compiled Alpaca pack and local runtime dependencies"
       ],
       "artifact": "compiled pack"
+    },
+    "open-alice#docker:smoke": {
+      "owner": "runtime-cli",
+      "lane": "system",
+      "kind": "host-acceptance",
+      "sideEffects": "builds a Docker image and runs a bounded container smoke of the production launch path",
+      "prerequisites": [
+        "Docker available"
+      ]
     }
   },
   "standalone": [

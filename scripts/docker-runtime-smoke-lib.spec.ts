@@ -112,7 +112,10 @@ describe('Dockerfile runtime contract', () => {
   })
 
   it('keeps the server build desktop-free and the remote lifecycle bounded', () => {
-    expect(dockerignore).toMatch(/^apps\/desktop$/m)
+    // Upstream's runtime retirement excludes all of apps/desktop except the
+    // pure activity modules the UI imports — Electron packaging stays out.
+    expect(dockerignore).toMatch(/^apps\/desktop\/\*\*$/m)
+    expect(dockerignore).toMatch(/^!apps\/desktop\/src\/activity-controller\.ts$/m)
     expect(compose).toContain('stop_grace_period: 30s')
     expect(compose).toContain('max-size: "10m"')
     expect(compose).toContain('max-file: "3"')

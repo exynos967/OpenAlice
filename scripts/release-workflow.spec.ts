@@ -98,7 +98,9 @@ describe('Release workflow critical path', () => {
   it('publishes existing stable npm assets without rebuilding or changing product channels', () => {
     const job = workflow.jobs['publish-existing-npm']
     expect(job.if).toBe("inputs.operation == 'publish-npm'")
-    expect(workflow.jobs.release.if).toBe("inputs.operation == 'release' || inputs.operation == 'mirror'")
+    // This fork keeps its repository guard on the release job so a manual
+    // dispatch can never plan an upstream release from the fork.
+    expect(workflow.jobs.release.if).toBe("github.repository == 'TraderAlice/OpenAlice' && (inputs.operation == 'release' || inputs.operation == 'mirror')")
     expect(needs(job)).toEqual([])
     expect(job['timeout-minutes']).toBe(15)
     const guard = step(job, 'Require the current published stable release').run ?? ''

@@ -437,7 +437,7 @@ describe('broker-pack installer', () => {
 
   it('recovers a lock left by an earlier container process that reused this PID', async () => {
     await publishCcxtPack()
-    const { brokerPackEngineRoot } = await import('../../core/broker-packs.js')
+    const { brokerPackEngineRoot } = await import('../../../src/core/broker-packs.js')
     const lock = resolve(brokerPackEngineRoot('ccxt'), '.install.lock')
     await mkdir(lock, { recursive: true })
     const beforeThisProcess = new Date(Date.now() - process.uptime() * 1000 - 60_000)

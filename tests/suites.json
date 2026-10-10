@@ -1448,5 +1448,17 @@
       "tests/integration/yahoo-history-contract/historical-contract.spec.ts"
     ],
     "scope": "Provider fetchers and historical query/normalization helpers; Yahoo SDK fully mocked, no external reads."
+  },
+  {
+    "id": "docker-acceptance",
+    "title": "Docker image and container acceptance",
+    "tier": "e2e",
+    "owner": "runtime-cli",
+    "lane": "system",
+    "areas": [],
+    "commands": [
+      "open-alice#docker:smoke"
+    ],
+    "scope": "Fork Docker lane: builds the image and runs the bounded container smoke. Host-acceptance only; requires Docker and is never executed by hermetic suite selection."
   }
 ]
