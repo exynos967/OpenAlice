@@ -19,8 +19,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "hono": "^4.12.32",
-    "undici": "^7.28.0",
+    "hono": "^4.13.7",
+    "undici": "^6.28.1",
     "yahoo-finance2": "^3.13.1",
     "zod": "^3.24.2"
   },

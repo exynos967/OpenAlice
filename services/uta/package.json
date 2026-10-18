@@ -17,7 +17,7 @@
     "@traderalice/guardian-runtime": "workspace:*",
     "@traderalice/uta-protocol": "workspace:*",
     "decimal.js": "^10.6.0",
-    "hono": "^4.12.32",
+    "hono": "^4.13.7",
     "zod": "^4.3.6"
   },
   "devDependencies": {
